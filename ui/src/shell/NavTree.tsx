@@ -6,7 +6,9 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { type ReactElement, useMemo } from "react";
 
 import type { RunRecord, TaskSummary } from "../api/models";
-import { useHosts, useOverview, useTasks } from "../api/queries";
+import { hasScope, phase3Available } from "../api/scopes";
+import { AppLink, hrefs } from "../pages/components/links";
+import { useMe, useHosts, useOverview, useTasks } from "../api/queries";
 import { Avatar } from "../chrome/Avatar";
 import { Icon } from "../chrome/Icon";
 import { StatusIcon } from "../chrome/StatusIcon";
@@ -60,6 +62,7 @@ export function isTaskPath(pathname: string, project: string, task: string): boo
 }
 
 export function NavTree(): ReactElement {
+  const me = useMe();
   const tasks = useTasks();
   const overview = useOverview();
   const hosts = useHosts();
@@ -84,6 +87,8 @@ export function NavTree(): ReactElement {
           Queue
           {queued !== undefined ? <span className="count">{queued}</span> : null}
         </Link>
+        <AppLink className="item" href={hrefs.settings()}>Settings</AppLink>
+        {phase3Available(me.data) && hasScope(me.data,"admin") && <AppLink className="item" href={hrefs.storage()}>Storage</AppLink>}
       </div>
       <div className="nav-h">Projects</div>
       <div className="nav-sec grow">
@@ -96,6 +101,7 @@ export function NavTree(): ReactElement {
                 <Avatar name={p.project} />
                 <span className="pn">{p.project}</span>
               </div>
+              {phase3Available(me.data) && <AppLink className="item task" href={hrefs.notebook(p.project)}>Notebook</AppLink>}
               {p.tasks.map((t) => {
                 const on = isTaskPath(pathname, p.project, t.task);
                 return (

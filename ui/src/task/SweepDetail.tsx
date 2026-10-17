@@ -188,6 +188,7 @@ function SweepBody({ project, sweepId, summary, runs, runsError, onRefresh, host
           items={sweepStats({
             counts,
             totalUsd: summary.total_usd,
+    costComplete: summary.cost_complete,
             best,
             names,
             metric,

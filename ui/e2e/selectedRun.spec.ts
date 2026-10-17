@@ -11,11 +11,16 @@ for (const userScrolls of [false, true]) {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let stepMetricsHeld = false;
-    await page.route("**/api/v1/tasks/**/views/query", async route => {
-      const response = await route.fetch();
-      if (route.request().postDataJSON()?.view?.title === "Step metrics") stepMetricsHeld = true;
-      await gate;
-      await route.fulfill({ response });
+    const routeTasks: Promise<void>[] = [];
+    await page.route("**/api/v1/tasks/**/views/query", route => {
+      const task = (async () => {
+        const response = await route.fetch();
+        if (route.request().postDataJSON()?.view?.title === "Step metrics") stepMetricsHeld = true;
+        await gate;
+        await route.fulfill({ response });
+      })();
+      routeTasks.push(task);
+      return task;
     });
     try {
       await page.goto(`/t/${path}`);
@@ -40,9 +45,6 @@ for (const userScrolls of [false, true]) {
         await expect.poll(async () => (await geometry()).scroll).toBeLessThan(before.scroll - 300);
       }
       release();
-      // Drain active handlers before ending the test; no aborted route.fetch and
-      // no ignored network errors can turn this regression into another flake.
-      await page.unrouteAll({ behavior: "wait" });
       await expect(page.locator('.task-page [aria-busy="true"]')).toHaveCount(0);
       await expect.poll(async () => (await geometry()).height).toBeGreaterThan(before.height + 700);
       await expect(heading).toBeFocused();
@@ -51,6 +53,16 @@ for (const userScrolls of [false, true]) {
       await info.attach("selected-run-layout", { body: JSON.stringify({ before, after: await geometry(), userScrolls }, null, 2), contentType: "application/json" });
     } finally {
       release();
+      // Keep interception installed until every callback finishes. unrouteAll
+      // clears handlers before waiting, which can auto-continue another held
+      // request when the first callback finishes. Include arrivals during drain
+      // and propagate fetch/fulfill failures rather than ignoring them.
+      let drained = 0;
+      while (drained < routeTasks.length) {
+        const batch = routeTasks.slice(drained);
+        drained = routeTasks.length;
+        await Promise.all(batch);
+      }
       await page.unrouteAll({ behavior: "wait" });
     }
   });

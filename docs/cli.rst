@@ -384,3 +384,88 @@ Environment variables
 A run's command gets ``HYPOTHEX_RUN_DIR``, ``HYPOTHEX_RUN_ID``, ``HYPOTHEX_PROJECT``,
 ``HYPOTHEX_SEED`` (when it has a seed), and ``CUDA_VISIBLE_DEVICES`` (when it holds
 GPUs).
+
+Team sessions and shared reads
+------------------------------
+
+Start a hub with scoped sessions, then create a one-time link for a collaborator::
+
+   hx serve --auth --public-url https://hub.example
+   hx pair --new-user --user alice --scope launch
+   hx login 'https://hub.example/pair#...'
+   hx whoami --json
+   hx sessions list
+   hx runs --owner me
+
+Set ``HYPOTHEX_HUB_URL`` to the hub URL printed by ``hx login``. A saved login
+applies only to that URL. ``HYPOTHEX_HUB_TOKEN`` takes precedence over the saved
+login. ``hx logout`` revokes and forgets the CLI session. Administrators can use
+``hx sessions list --all``, ``hx sessions revoke ID``, ``hx users list`` and
+``hx users disable NAME``. Pairing URLs expire after five minutes and are single
+use; neither login nor whoami prints the session token.
+
+Logged-in clients read projects, tasks, notebooks, digests and exports from the
+hub. Runs retain the merged local and hub list, including when authentication
+uses only an environment token. ``--owner me`` resolves identity through the
+configured hub; it requires that hub to answer. Named owner filters work locally.
+
+A lab server can issue ``hx pair --client host --scope admin``; the hub redeems
+that link with ``hx hosts pair lab 'https://lab.example/pair#...'``. New URL hosts
+can use ``hx hosts add lab --url https://lab.example --pair 'PAIRING_URL'`` or
+``--token-env LAB_TOKEN``. See :doc:`team` for roles and pairing,
+:doc:`export` for paper tables, :doc:`notifications` for delivery settings and
+:doc:`storage` for cleanup safeguards.
+
+Tables, notebooks and digests
+-----------------------------
+
+::
+
+   hx export toy/classify --format latex --primary accuracy/value -o table.tex
+   hx export --runs run-a,run-b --format csv
+   hx note --project toy 'Compare [[run:run-a]] with the baseline'
+   hx notebook list -p toy
+   hx notebook show -p toy --day 2026-10-04
+   hx digest -p toy --since 7d
+   hx digest -p toy --send --channels slack,email
+
+Task exports default to the configured primary metric. ``--primary metric/key``
+changes task ranking; it is rejected with ``--runs``. Export ``--json`` returns
+``format``, ``text`` and the local table; client mode returns ``table: null``.
+The existing ``hx note RUN_ID TEXT`` form still adds a run note. Digest windows
+accept hours (``12h``), days (``7d``) and weeks (``2w``).
+
+Notifications and storage
+-------------------------
+
+::
+
+   hx notify status --json
+   hx notify test slack
+   hx storage report --local-only
+   hx storage clean --archived --older-than 30d --dry-run
+   hx storage clean --apply cp-01234567
+
+A cleanup command first creates a plan and never deletes files at that stage.
+Applying the plan asks for its exact byte total. ``--yes`` skips typing that
+confirmation; a plan on another machine also needs ``--confirm-bytes N``.
+Notifications, cleanup and digest sending use the running hub when it answers,
+otherwise the current home. Notification status shows variable names and whether
+they are set, without displaying their values.
+
+PostgreSQL index maintenance
+----------------------------
+
+``hx db upgrade`` applies the configured PostgreSQL index migrations and
+``hx db current`` prints its revision. Both support ``--json`` and work before
+an index is initialized. SQLite requires no migrations and refuses these commands.
+
+Team demo identity
+------------------
+
+``hx --home /tmp/hx-team demo --with-team`` seeds the fixed users ``sv`` (admin)
+and ``alice`` (launch). A subsequent ``hx --home /tmp/hx-team serve`` uses ``sv``
+as its local owner regardless of the operating-system username and prints fresh
+pairing links. This applies only to homes with the seeded
+``demo-team/team.json`` marker. Ordinary homes retain their OS-derived initial
+owner and refuse to bootstrap a different owner after initialization.

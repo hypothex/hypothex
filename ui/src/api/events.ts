@@ -1,3 +1,4 @@
+import { noteNotebookEditor } from "./notebookEditors";
 /**
  * Live updates over `/api/v1/ws`.
  *
@@ -167,6 +168,17 @@ export function backoffDelay(attempt: number): number {
  * - anything else: nothing.
  */
 export function keysForEvent(event: HxEvent): QueryKey[] {
+  const project = event.project ?? event.payload?.project;
+  if (event.type === "notebook.updated") {
+    const { day, author } = event.payload ?? {};
+    if (typeof project === "string" && typeof day === "string") noteNotebookEditor({project,day,author:typeof author === "string" ? author : undefined,at:event.created_at});
+    return typeof project === "string" ? [["notebook",project]] : [];
+  }
+  if (event.type === "digest.sent") return typeof project === "string" ? [["notebook",project]] : [];
+  if (event.type.startsWith("notify.")) return [["notify"]];
+  if (event.type.startsWith("auth.")) return [["auth"]];
+  if (event.type.startsWith("storage.")) return [["storage"],...narrow(RUN_EVENT_INVALIDATES,event)];
+  if (event.type === "run.artifacts_cleaned") return [["storage"],...narrow(RUN_EVENT_INVALIDATES,event)];
   if (event.type === "sweep.issuance") {
     const project = event.project ?? event.payload?.project;
     const id = event.payload?.sweep_id;
@@ -388,6 +400,7 @@ export class EventStream {
       this.scheduleReconnect();
       return;
     }
+    const credentialGeneration = auth.snapshot().generation;
     this.socket = socket;
     socket.onopen = () => {
       if (socket !== this.socket) return;
@@ -404,8 +417,10 @@ export class EventStream {
     socket.onerror = () => {
       // A close event always follows an error; reconnecting happens there.
     };
-    socket.onclose = () => {
-      if (socket === this.socket) this.handleClose();
+    socket.onclose = (event) => {
+      if (socket !== this.socket) return;
+      if (event.code === 4401) { auth.lock(credentialGeneration); this.stop(); return; }
+      this.handleClose();
     };
   }
 
@@ -587,7 +602,12 @@ export interface LiveUpdatesProps {
  * Keeps the app's queries live and gives `children` the stream status
  * (`useStreamStatus`). Render once inside the `QueryClientProvider`, around the app.
  */
-export function LiveUpdates({ children, options }: LiveUpdatesProps) {
+export const LiveUpdatesOverrideContext = createContext<StreamStatus | null>(null);
+export function LiveUpdates(props: LiveUpdatesProps) {
+  const override=useContext(LiveUpdatesOverrideContext);
+  return override === null ? createElement(ConnectedLiveUpdates,props) : createElement(StreamStatusContext.Provider,{value:override},props.children);
+}
+function ConnectedLiveUpdates({ children, options }: LiveUpdatesProps) {
   const status = useEventStream(options);
   return createElement(StreamStatusContext.Provider, { value: status }, children);
 }

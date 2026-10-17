@@ -3,10 +3,11 @@
  * bar, the routed page; the command palette and the one chart tooltip are mounted here.
  * ⌘. / Ctrl+. hides or shows the nav (kept in localStorage).
  */
-import { Link, Outlet } from "@tanstack/react-router";
+import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { type ReactElement, useCallback, useEffect, useState } from "react";
 
-import { useStreamStatus } from "../api/events";
+import { AuthGate } from "../api/AuthGate";
+import { LiveUpdates, useStreamStatus } from "../api/events";
 import { useHubEnvironment } from "../api/queries";
 import { TooltipHost } from "../charts/Tooltip";
 import { cx } from "../lib/cx";
@@ -53,6 +54,11 @@ function HubVersion(): ReactElement {
 }
 
 export function AppShell(): ReactElement {
+ const path=useRouterState({select:s=>s.location.pathname});
+ if (/^\/pair\/?$/.test(path)) return <Outlet/>;
+ return <AuthGate><LiveUpdates><AuthenticatedShell/></LiveUpdates></AuthGate>;
+}
+function AuthenticatedShell(): ReactElement {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [navOpen, setNavOpen] = useState(readNavOpen);
   const toggleNav = useCallback(() => setNavOpen((open) => !open), []);

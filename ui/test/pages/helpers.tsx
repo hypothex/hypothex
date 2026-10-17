@@ -26,6 +26,8 @@ export class HttpReply {
 type Handler = unknown | ((call: Call) => unknown);
 
 const realFetch = globalThis.fetch;
+const LOCAL_PRINCIPAL={auth:"off",user:"local",scope:"admin",scopes:["read","launch","admin"],session_id:null,client:"local",public_url:null};
+let implicitLocalPrincipal=true;
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -43,6 +45,7 @@ function json(status: number, body: unknown): Response {
  */
 export function mockApi(routes: Record<string, Handler>): Call[] {
   const calls: Call[] = [];
+  implicitLocalPrincipal=!("GET /api/v1/auth/me" in routes);
   const fake = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? `${input.pathname}${input.search}` : input.url;
@@ -51,6 +54,7 @@ export function mockApi(routes: Record<string, Handler>): Call[] {
     const call = { method, url, body };
     calls.push(call);
     const key = `${method} ${url}`;
+    if (!(key in routes) && key === "GET /api/v1/auth/me") return json(200,LOCAL_PRINCIPAL);
     if (!(key in routes)) return json(404, { error: `unmocked ${key}`, type: "StoreError" });
     const handler = routes[key];
     const out = typeof handler === "function" ? await (handler as (c: Call) => unknown)(call) : handler;
@@ -64,6 +68,7 @@ export function mockApi(routes: Record<string, Handler>): Call[] {
 /** Put the real `fetch` back (call in `afterEach`). */
 export function restoreFetch(): void {
   globalThis.fetch = realFetch;
+  implicitLocalPrincipal=true;
 }
 
 /** Replace `navigator.clipboard`; returns the texts written. */
@@ -89,6 +94,9 @@ export interface RenderOpts {
 /** Render inside a fresh QueryClient (no query retries), with optional fakes. */
 export function renderWithClient(ui: ReactElement, opts: RenderOpts = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // Existing component fixtures model a validated local-root session. Phase3 fixtures that
+  // explicitly provide /auth/me exercise capability loading and permission states.
+  if(implicitLocalPrincipal) { client.setQueryDefaults(["auth","me"],{staleTime:Infinity}); client.setQueryData(["auth","me"],LOCAL_PRINCIPAL); }
   let tree = <QueryClientProvider client={client}>{ui}</QueryClientProvider>;
   if (opts.registry) {
     tree = <PanelRegistryContext.Provider value={opts.registry}>{tree}</PanelRegistryContext.Provider>;

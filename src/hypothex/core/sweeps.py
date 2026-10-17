@@ -180,6 +180,7 @@ class SweepSpec(BaseModel, extra="forbid"):
     command_template: list[str] = Field(min_length=1)
     created_by: str
     created_at: datetime
+    owner: str | None = None
     commit: str | None = Field(None, pattern=COMMIT_PATTERN.pattern)
     diff: str | None = None
 
@@ -526,6 +527,44 @@ def _sweep_lock(layout: Layout, project: str, sweep_id: str) -> Iterator[None]:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+def sweep_issuing(layout: Layout, project: str, sweep_id: str) -> bool:
+    """
+    Tell whether a launch or extend of a sweep is issuing its runs right now.
+
+    ``launch_sweep`` and ``extend_sweep`` hold the sweep's lock while they
+    issue runs one by one; this tries the lock without waiting. The notifier
+    uses it so a short first run that ends before the last launch does not
+    read as a finished sweep.
+
+    Parameters
+    ----------
+    layout : Layout
+    project : str
+    sweep_id : str
+
+    Returns
+    -------
+    bool
+        True while another open file holds the lock (this process included:
+        ``flock`` locks belong to the open file, not the process).
+
+    Examples
+    --------
+    >>> sweep_issuing(ctx.layout, "toy", "s-0001")  # doctest: +SKIP
+    False
+    """
+    path = sweep_path(layout, project, sweep_id).with_suffix(".lock")
+    if not path.is_file():
+        return False
+    with path.open("a") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    return False
+
+
 def new_sweep_id(layout: Layout, project: str) -> str:
     """
     Reserve a new sweep id by creating its (empty) file exclusively.
@@ -661,6 +700,8 @@ class SweepSummary(BaseModel):
     best: dict[str, Any] | None
     headline: str
     total_usd: float
+    cost_complete: bool = False
+    """Every nonempty member has explicitly complete recorded pricing."""
     run_ids: list[str] = Field(default_factory=list)
     """The sweep's members (runs tagged ``tag``), in launch order; derived."""
     tag: str = ""
@@ -932,6 +973,8 @@ def _summarize(ctx: Context, spec: SweepSpec) -> SweepSummary:
         best=ranked[0] if ranked else None,
         headline=headline,
         total_usd=math.fsum(_run_usd(r) for r in runs),
+        cost_complete=bool(runs)
+        and all(r.cost is not None and r.cost.gpu_pricing_complete is True for r in runs),
         run_ids=[r.run_id for r in runs],
         tag=sweep_tag(ctx.descriptor.environment_id, spec.id),
         issuance=SweepIssuance.model_validate(operation["issuance"]) if operation else None,
@@ -1183,6 +1226,7 @@ def _requests(
                     params=dict(combo),
                     vars=dict(combo),
                     created_by=spec.created_by,
+                    owner=spec.owner,
                     gpus=gpus,
                     queue=queue,
                     commit=commit,
@@ -1350,6 +1394,7 @@ def launch_sweep(
     gpus: int = 0,
     queue: bool = False,
     created_by: str = "human",
+    owner: str | None = None,
     repo: Path | None = None,
     launch: Launcher | None = None,
     command_id: str | None = None,
@@ -1392,6 +1437,8 @@ def launch_sweep(
         GPUs per run.
     queue : bool
         Queue runs until their GPUs are free.
+    owner : str, optional
+        User name stored on the sweep and given to each of its runs.
     created_by : str
         ``human`` or ``agent:<name>``.
     repo : Path, optional
@@ -1434,6 +1481,7 @@ def launch_sweep(
     if gpus < 0:
         raise SweepError("gpus must be 0 or more")
     draft = _draft(project, task, host, grid, random, seeds, command, created_by, commit, diff)
+    draft = draft.model_copy(update={"owner": owner})
     repo_path = _resolve_repo(ctx, project, task, repo, remote=launch is not None)
     with _created(ctx, draft, command_id) as (spec, resumed):
         requests = _requests(

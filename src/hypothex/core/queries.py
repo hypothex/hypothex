@@ -44,6 +44,7 @@ from hypothex.core.records import (
     RunStatus,
     ScoreRecord,
 )
+from hypothex.core.storage import CleanedArtifact, cleaned_artifacts, cleanup_lock
 from hypothex.core.store import ProjectEntry
 
 LOG_TAIL_BYTES = 8 * 1024 * 1024
@@ -83,6 +84,7 @@ class RunDetail(BaseModel):
     has_diff: bool
     metric_names: list[str]
     children: list[str]
+    cleaned: list[CleanedArtifact] = Field(default_factory=list)
 
 
 class Comparison(BaseModel):
@@ -629,6 +631,7 @@ def show_run(ctx: Context, run_id: str) -> RunDetail:
             else ctx.store.read_metric_names_bounded(record.project, run_id)
         ),
         children=sorted(ctx.index.child_run_ids(run_id)),
+        cleaned=cleaned_artifacts(ctx, record),
     )
 
 
@@ -1280,9 +1283,10 @@ def star_run(ctx: Context, run_id: str, on: bool = True) -> RunRecord:
     -------
     RunRecord
     """
-    return ctx.update_run(
-        run_id, "run.starred", lambda r: r.model_copy(update={"starred": on}), {"on": on}
-    )
+    with cleanup_lock(ctx.layout):
+        return ctx.update_run(
+            run_id, "run.starred", lambda r: r.model_copy(update={"starred": on}), {"on": on}
+        )
 
 
 def archive_run(ctx: Context, run_id: str, on: bool = True) -> RunRecord:
@@ -1302,9 +1306,10 @@ def archive_run(ctx: Context, run_id: str, on: bool = True) -> RunRecord:
     -------
     RunRecord
     """
-    return ctx.update_run(
-        run_id, "run.archived", lambda r: r.model_copy(update={"archived": on}), {"on": on}
-    )
+    with cleanup_lock(ctx.layout):
+        return ctx.update_run(
+            run_id, "run.archived", lambda r: r.model_copy(update={"archived": on}), {"on": on}
+        )
 
 
 def rename_run(ctx: Context, run_id: str, name: str | None) -> RunRecord:

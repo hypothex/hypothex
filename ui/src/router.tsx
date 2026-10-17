@@ -1,3 +1,6 @@
+import { SettingsPage } from "./pages/Settings";
+import { StoragePage } from "./pages/Storage";
+import { NotebookPage } from "./pages/Notebook";
 /**
  * Code-defined routes (ui-v5 contract): `/` Home, `/t/$project/$task?tab=&filter=&group=
  * &sort=&hide=&sup=&sweep=` Task, `/t/$project/$task/edit/$view` view editor (`new` for a
@@ -18,6 +21,7 @@ import {
 } from "@tanstack/react-router";
 import { type ReactElement } from "react";
 
+import { PairPage } from "./pages/Pair";
 import { ExamplesPage } from "./pages/Examples";
 import { HomePage } from "./home/HomePage";
 import { HostsPage } from "./hosts/HostsPage";
@@ -198,7 +202,15 @@ export const queueRoute = createRoute({
   component: QueuePage,
 });
 
+export const pairRoute = createRoute({getParentRoute:()=>rootRoute,path:"/pair",component:PairPage});
+
+export const settingsRoute=createRoute({getParentRoute:()=>rootRoute,path:"/settings",component:SettingsPage});
+export const storageRoute=createRoute({getParentRoute:()=>rootRoute,path:"/storage",component:StoragePage});
+export const notebookRoute=createRoute({getParentRoute:()=>rootRoute,path:"/n/$project",component:NotebookPage});
+export const notebookDayRoute=createRoute({getParentRoute:()=>rootRoute,path:"/n/$project/$day",component:NotebookPage});
 export const routeTree = rootRoute.addChildren([
+  settingsRoute, storageRoute, notebookRoute, notebookDayRoute,
+  pairRoute,
   overviewRoute,
   taskRoute,
   viewEditorRoute,

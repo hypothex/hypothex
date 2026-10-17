@@ -1,0 +1,147 @@
+{
+  "project": "toy",
+  "repo": "__HX_FIXTURE_ROOT__/toy",
+  "config": {
+    "project": "toy",
+    "description": "",
+    "datasets": {
+      "toyset": {
+        "version": "v1",
+        "path": "data/test.jsonl",
+        "host": "local",
+        "description": "",
+        "splits": {
+          "test": "data/test.jsonl"
+        },
+        "id_field": "id",
+        "reference_field": "reference"
+      }
+    },
+    "metrics": {
+      "accuracy": {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "params": {},
+        "changelog": {},
+        "unit": ""
+      },
+      "broken": {
+        "version": "v1",
+        "fn": "toymetrics:broken",
+        "params": {},
+        "changelog": {},
+        "unit": ""
+      },
+      "up": {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "higher_is_better": true,
+        "params": {},
+        "changelog": {},
+        "unit": ""
+      },
+      "down": {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "higher_is_better": false,
+        "params": {},
+        "changelog": {},
+        "unit": ""
+      },
+      "latency": {
+        "version": "v1",
+        "fn": "toymetrics:accuracy",
+        "params": {},
+        "changelog": {},
+        "unit": ""
+      }
+    },
+    "tasks": {
+      "toy-acc": {
+        "dataset": "toyset",
+        "split": "test",
+        "metrics": [
+          "accuracy"
+        ],
+        "primary": "accuracy",
+        "description": "",
+        "kind": "generic",
+        "views": {},
+        "baseline": null,
+        "version_param": "version",
+        "score_keys": null
+      },
+      "toy-broken": {
+        "dataset": "toyset",
+        "split": "test",
+        "metrics": [
+          "accuracy",
+          "broken"
+        ],
+        "primary": "accuracy",
+        "description": "",
+        "kind": "generic",
+        "views": {},
+        "baseline": null,
+        "version_param": "version",
+        "score_keys": null
+      },
+      "direction": {
+        "dataset": "toyset",
+        "split": "test",
+        "metrics": [
+          "up",
+          "down"
+        ],
+        "primary": "up",
+        "description": "",
+        "kind": "generic",
+        "views": {},
+        "baseline": null,
+        "version_param": "version",
+        "score_keys": null
+      },
+      "bench": {
+        "dataset": "toyset",
+        "split": "test",
+        "metrics": [
+          "latency"
+        ],
+        "primary": "latency/p95",
+        "description": "",
+        "kind": "system_bench",
+        "views": {},
+        "baseline": null,
+        "version_param": "version",
+        "score_keys": null
+      },
+      "matrix": {
+        "dataset": "toyset",
+        "split": "test",
+        "metrics": [
+          "accuracy"
+        ],
+        "primary": "accuracy/set-0.m-a.top1",
+        "description": "",
+        "kind": "generic",
+        "views": {},
+        "baseline": null,
+        "version_param": "version",
+        "score_keys": "{dataset}.{model}.{metric}"
+      }
+    },
+    "stages": {
+      "infer": "__HX_FIXTURE_PYTHON__ infer.py --ckpt {checkpoint}"
+    },
+    "env": {
+      "setup": null,
+      "python": [
+        "__HX_FIXTURE_PYTHON__"
+      ]
+    }
+  },
+  "registered_at": "2026-10-16T21:27:35.403181Z",
+  "previous_repos": [],
+  "remote_host": null,
+  "config_format": 2
+}

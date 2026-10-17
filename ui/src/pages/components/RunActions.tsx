@@ -6,8 +6,9 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
-import type { EvalReport } from "../../api/models";
-import { HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "../../api/queries";
+import type { CleanedArtifact, EvalReport } from "../../api/models";
+import { hasScope, mayAct } from "../../api/scopes";
+import { useMe, HOST_EVENT_INVALIDATES, REMOTE_RUN_INVALIDATES, RUN_EVENT_INVALIDATES } from "../../api/queries";
 import { Icon } from "../../chrome/Icon";
 import { menuArrowKeys, useMenuFocus } from "../../chrome/menuFocus";
 import { useArmed } from "../../run/useArmed";
@@ -17,6 +18,7 @@ import { ReevalSummary } from "./ReevalSummary";
 import type { RunPhase } from "./remote";
 import { ACTIVE_STATUSES, type HostState, type RunRecord, type RunRef } from "./types";
 import { useAction } from "./useAction";
+import { cleanedArtifact } from "./cleaned";
 
 export interface RunActionsProps {
   record: RunRecord;
@@ -29,8 +31,10 @@ export interface RunActionsProps {
    * the hosts list is not loaded. Never `executor.host` (the machine's hostname).
    */
   hostName?: string | null;
+  hostRepair?: string | null;
   /** Only a successfully loaded task with an infer stage enables Re-infer. */
   inferStage?: boolean;
+  cleaned?: readonly CleanedArtifact[];
   /** Examples page link; null: no other config (disabled); undefined: no Compare button. */
   compareHref?: string | null;
 }
@@ -58,11 +62,19 @@ export function RunActions({
   record,
   phase = "local",
   hostName = null,
+  hostRepair = null,
   served,
   hostsLoaded = false,
   inferStage,
+  cleaned = [],
   compareHref,
 }: RunActionsProps) {
+  const checkpoint = record.artifacts.filter(artifact=>artifact.kind==="checkpoint").at(-1);
+  const checkpointCleaned = checkpoint && cleanedArtifact(checkpoint.path,record.environment_id,cleaned);
+  const me=useMe();
+  const writable=hasScope(me.data,"launch");
+  const ownerAction=mayAct(me.data,record.owner);
+  const executable=writable && (phase !== "local" || hasScope(me.data,"admin"));
   const navigate = useNavigateHref();
   const id = record.run_id;
   const label = hostName ?? record.host;
@@ -112,12 +124,12 @@ export function RunActions({
   const lost = phase === "lost";
   return (
     <div className="run-actions">
-      <div className="actions">
+      <div className="actions" title={!writable ? "Launch scope required" : !ownerAction ? "Stop and archive need the run owner or admin" : undefined}>
         {waiting ? (
           <button
             type="button"
             className="btn primary"
-            disabled={!served || stop.pending}
+            disabled={!ownerAction || !served || stop.pending}
             onClick={() => stop.run(true)}
             title={
               !served ? unavailable : phase === "pending" && record.executor.slurm_job_id
@@ -132,12 +144,12 @@ export function RunActions({
             <button
               type="button"
               className="btn primary"
-              disabled={!served || reconnect.pending || hostName === null}
+              disabled={!hasScope(me.data,"admin") || !served || !!hostRepair || reconnect.pending || hostName === null}
               onClick={() => {
-                if (hostName !== null) reconnect.run();
+                if (hostName !== null && !hostRepair) reconnect.run();
               }}
               title={
-                !served ? unavailable : hostName === null
+                !served ? unavailable : hostRepair ? hostRepair : hostName === null
                   ? hostsLoaded ? unavailable : `The hosts list is not loaded, so the hub's name for ${record.host} is unknown`
                   : `Try ${hostName} again now`
               }
@@ -162,7 +174,7 @@ export function RunActions({
             <button
               type="button"
               className={lost ? "btn primary" : "btn"}
-              disabled={!served || rerun.pending}
+              disabled={!executable || !served || rerun.pending}
               onClick={() => rerun.run()}
               title={!served ? unavailable : "Run again with the same command, code, and seed"}
             >
@@ -186,13 +198,13 @@ export function RunActions({
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={!served || reinfer.pending || inferStage !== true}
+                    disabled={!executable || !served || reinfer.pending || !!checkpointCleaned || inferStage !== true}
                     onClick={() => {
                       close();
                       reinfer.run();
                     }}
                     title={
-                      !served ? unavailable : inferStage === true
+                      !served ? unavailable : checkpointCleaned ? "Checkpoint was deleted by cleanup" : inferStage === true
                         ? "Run the infer stage again on this run's checkpoint"
                         : inferStage === false ? "Task has no infer stage" : "Infer stage not loaded"
                     }
@@ -202,7 +214,7 @@ export function RunActions({
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={!served || reeval.pending}
+                    disabled={!writable || !served || reeval.pending}
                     onClick={() => {
                       close();
                       setReport(null);
@@ -215,9 +227,9 @@ export function RunActions({
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={!served || !active || stop.pending}
+                    disabled={!ownerAction || !served || !active || stop.pending}
                     onClick={() => {
-                      if (!served || !active || stop.pending) return;
+                      if (!ownerAction || !served || !active || stop.pending) return;
                       if (armed) {
                         disarm();
                         close();
@@ -237,7 +249,7 @@ export function RunActions({
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={!served || archive.pending}
+                    disabled={!ownerAction || !served || archive.pending}
                     onClick={() => {
                       close();
                       archive.run(!record.archived);

@@ -43,7 +43,7 @@ from hypothex.core.store import ProjectEntry, dir_lock, run_lock
 from hypothex.core.tokens import redact_bearer_token
 from hypothex.remote.bootstrap import BootstrapError, ensure_server
 from hypothex.remote.client import EnvClient, EnvRequestError, RemoteFile
-from hypothex.remote.config import EnvironmentsFile, HostKind, HostSpec
+from hypothex.remote.config import EnvironmentsFile, HostKind, HostSpec, host_token
 from hypothex.remote.ssh import SshTarget, Tunnel, reap_stale_tunnels
 
 log = logging.getLogger(__name__)
@@ -1395,13 +1395,15 @@ class Hub:
                 return
             except EnvRequestError as exc:
                 status = _auth_failure(exc)
-                if status is not None:  # retrying with the same token cannot help
-                    self._set(
-                        sup,
-                        "error",
-                        f"authentication failed (HTTP {status}); reconnect or re-pair: "
-                        f"hx hosts connect {sup.name}",
-                    )
+                if status is not None:  # retrying with the same token cannot help (spec 5.3)
+                    if sup.spec.route == "url":
+                        message = f"auth failed: hx hosts pair {sup.name} <pairing-url>"
+                    else:
+                        message = (
+                            f"authentication failed (HTTP {status}); reconnect or re-pair: "
+                            f"hx hosts connect {sup.name}"
+                        )
+                    self._set(sup, "error", message)
                     return
                 sup.failure, sup.failed_bootstrap = _brief(exc), False
             except BootstrapError as exc:
@@ -1458,7 +1460,11 @@ class Hub:
         pinger: EnvClient | None = None
         try:
             sup.expected_environment_id = None
-            sup.token = None  # route url: no token; route ssh: _open_route sets it
+            sup.token = None  # route ssh: _open_route sets it from server.json
+            if sup.spec.route == "url":
+                # read again every session: `hx hosts pair` then connect uses the new one
+                secret = host_token(self.ctx.layout, sup.name, sup.spec)
+                sup.token = secret.get_secret_value() if secret is not None else None
             base_url = await self._open_route(sup)
             socket_path = sup.tunnel.unix_socket if sup.tunnel is not None else None
             pinger = EnvClient(base_url, timeout=PING_TIMEOUT_SECONDS, unix_socket=socket_path)

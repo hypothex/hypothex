@@ -1,0 +1,11 @@
+.phase3-page { box-sizing: border-box; max-width: 1480px; min-width: 0; padding: 20px; display: grid; gap: 16px; align-content: start; }
+.phase3-section { background: var(--panel, var(--paper)); border: 1px solid var(--line, var(--rule)); border-radius: 10px; padding: 16px; min-width: 0; }
+.phase3-page table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.phase3-page th, .phase3-page td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line, var(--rule)); vertical-align: top; }
+.phase3-scroll { overflow-x: auto; }
+.phase3-fields { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.phase3-page label { display: inline-flex; flex-direction: column; gap: 6px; }
+.phase3-page input, .phase3-page select, .phase3-page textarea { background: var(--panel, var(--paper)); color: var(--ink); border: 1px solid var(--line, var(--rule)); border-radius: 7px; padding: 7px 9px; font: inherit; max-width: 100%; }
+.phase3-page textarea { display: block; width: 100%; min-height: 140px; font-family: var(--mono); }
+.phase3-page pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); }
+.phase3-page button:focus-visible, .phase3-page input:focus-visible, .phase3-page textarea:focus-visible { outline: 2px solid var(--focus, #2a78d6); outline-offset: 2px; }

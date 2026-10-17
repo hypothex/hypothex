@@ -1,4 +1,4 @@
-# Phase 3 review gates and implementation readiness
+# Phase 3 implementation and verification
 
 User direction (2026-10-06): obtain a primary review followed by an independent
 adversarial review. Start implementation only after both return LGTM on the final
@@ -8,8 +8,9 @@ integrated workflows are acceptance requirements, not just unit-test totals.
 ## Baseline and scope
 
 - Plan branch: `p3-plans`, initial head `4392c8b90f96a23b6d35477520f86ebf45075bb1`.
-- Current fetched main: `f6f130cfa2669bfcccbadcb36282dd5fea881d1f` (UI v5 with PR26 viewport fix).
-- Existing draft PR: https://github.com/hypothex/hypothex/pull/22.
+- Pre-gate main: `f6f130cfa2669bfcccbadcb36282dd5fea881d1f` (UI v5 with PR26 viewport fix).
+- Implementation base: merged plans head `244d55f9c3be775b8c335bb258bbe9d5858ef83e`.
+- Plan PR (merged): https://github.com/hypothex/hypothex/pull/22.
 - Authoritative scope: the Phase 3 contract, backend/frontend plans and mockups
   under `docs/superpowers/plans/` and `docs/mockups/phase3/`.
 - Preserve all 13 contract scope items. Reconcile the later backlog and final
@@ -17,23 +18,72 @@ integrated workflows are acceptance requirements, not just unit-test totals.
 - Existing review rounds 4–6 and their bounded fixes are prior evidence, not the
   two approvals requested now. New material plan changes require re-review.
 
-## Gates
+## Gates (cleared 2026-10-17)
 
-- [ ] Primary review against the spec, all three plan documents and actual main.
-- [ ] Reproduce and resolve actionable findings in documents; obtain LGTM.
-- [ ] Independent adversarial review of the resulting plan and current main.
-- [ ] Resolve findings; obtain adversarial LGTM and reconfirm primary approval
-  where the reviewed plan changed materially.
-- [ ] Record exact reviewed revisions and both final verdicts before source work.
+- [x] Primary R5 full-plan LGTM on `2ebfc28` against `f6f130c`.
+- [x] Independent adversarial R2 full-plan LGTM on the same input.
+- [x] Parent inspected reports, coverage and probes; verified all 38 primary and
+  26 adversarial artifact hashes and all eight live plan input hashes.
+- [x] All six CI checks passed that exact plans head.
+- [x] PR22 merged as `244d55f9c3be775b8c335bb258bbe9d5858ef83e`.
+- [x] Implementation started in `/tmp/hx-phase3-implementation`, branch
+  `phase3-implementation`; the user checkout remains untouched.
+
+These gates approve implementation of every scope item, not runtime completion.
+The optional UI documentation paragraph preservation is carried into frontend
+implementation. Detailed receipts remain in the durable evidence directory under
+`primary-refresh-r5/`, `adversarial-gate-r2/`, and the corresponding parent
+verification JSON files. Fresh review probes: primary 73 guard tests plus two
+bootstrap child tests; adversarial 67 probes. Reused evidence is hash documented;
+assembled, installed-package and Docker acceptance remains required below.
+
+## Active ownership and progress
+
+| Tasks | Owner | State |
+| --- | --- | --- |
+| Backend 1 | isolation worker | 244 guard + 23 loopback tests pass; parent reviewed guard/source receipt |
+| Backend 2–4 | settings/owners worker | 70 focused + 263 regressions pass; source handoffs complete |
+| Backend 5–7 | auth foundation worker | 99 focused pass; parent inspected auth contracts/client and found/fixed duplicate test package init |
+| Backend 8 | parent | 20 notebook tests pass, including concurrent writes/conflicts; docs complete |
+| Backend 9–12 | papers/export worker | 114 focused + 262 regression tests pass; five golden outputs |
+| Backend 13–19, 30 providers | notifications worker | 257 scoped tests pass; final notification suite 115 pass after independently verified partial-recipient fix |
+| Backend 20–22 | storage worker | Final 273 affected tests and 27 independent probes pass; excluded overlaps, shared ownership, alias races and exact remote confirmation corrected |
+| Backend 23–31 | API worker | 385 API/core tests pass; final 138 affected receipt tests pass; independent actual launch retry executes once |
+| Backend 32–33, MCP 41 | MCP worker | 197 MCP tests pass; new tools and existing regressions |
+| Backend 34–36 | Postgres worker | 13 actual PostgreSQL Docker tests, 305 core/remote and 252 evaluator tests pass |
+| Backend 37–44, CLI 35 | CLI/remote worker | 232 CLI tests and 14 lifecycle tests pass; selected-home isolation fixed; pairing leak 15 red/green plus nine independent probes pass |
+| Backend 45 | parent + CLI adapter owner | 47 final demo tests pass; actual shared-host launch/stop verified with an independent generated repository |
+| Backend 46 | parent + feature docs owners | Pages/skill/index integrated; final Sphinx warnings-as-errors passes; populated additive JSON snapshots verified |
+| Backend 47 | parent | Final assembled scan passes with successful API/CLI/channel operations and scrubbed child environment |
+| Backend 48 | acceptance worker | Four actual subprocess/HTTP/MCP acceptance scenarios pass, including 30-second WebSocket revocation and restart dedupe |
+| Backend 49 | package worker | 21 harness tests and all five final installed checks pass; 20 browser executions; genuine schema-3/4 upgrades; exact wheel/source hashes verified |
+| Frontend 1–8, 24–26 | UI integration worker | 1510 Bun tests, typecheck/build pass; 122 existing browser tests plus final 28 affected tests pass; six screenshots verified |
+| Frontend 9–23 | UI features worker | Leaf screens complete; export/cleanup accessibility and notebook concurrency regressions pass in final full UI suite |
+
+Counts are scoped evidence from their recorded revisions; overlapping runs are
+not additive totals and do not yet establish final whole-application acceptance.
+Parent JSON snapshots exercised populated owner/baseline/cleanup values: observed
+only intended additive paths (plus host token_env and sweep cost_complete), with
+zero removed baseline keys; final rerun is recorded in implementation evidence.
+The parent started the previously stopped Colima default VM for authorized Docker
+checks using --activate=false --ssh-config=false --ssh-agent=false --save-config=false.
+All Docker commands used its explicit socket. After the 24 passing Docker tests,
+no containers remained running and the owned VM was stopped. Both existing
+profiles are now stopped; the user's default context and SSH configuration were
+not changed.
+
+One writer owns each file. The parent owns shared docs/index, dependency files,
+CLI JSON snapshots, this tracker, integration and final review/acceptance.
+Implementation evidence is under the durable sibling `implementation/` directory.
 
 ## Execution after both review gates
 
-- [ ] Refresh the plans against main, preserving the accepted contract and scope.
-- [ ] Implement dependency-ready backend and frontend increments in isolated
+- [x] Refresh the plans against main, preserving the accepted contract and scope.
+- [x] Implement dependency-ready backend and frontend increments in isolated
   `/tmp/hx-*` worktrees, with failing tests first and one writer per owned file.
 - [ ] Review actual diffs, run affected and required checks, link every PR, and
   merge only after all current-head CI checks pass. Retain PR branches.
-- [ ] Verify the complete collaborator pairing/shared-host/revocation workflow,
+- [x] Verify the complete collaborator pairing/shared-host/revocation workflow,
   notebook, baselines/exports, notifications/digest, storage protections,
   Postgres migration/rebuild equivalence, authenticated MCP and SDK cost logging.
 - [ ] Verify fresh installation and existing-home upgrade behavior with synthetic
@@ -43,9 +93,143 @@ integrated workflows are acceptance requirements, not just unit-test totals.
 - [ ] Write a concise testing handoff with setup commands, version/commit,
   supported workflows, expected results and material remaining limitations.
 
+## Final integration status (2026-10-17)
+
+The `1e474e6` CI run passed both Linux jobs, UI, Docker and installed
+package acceptance. macOS Python 3.11 failed seven cleanup permission cases and
+the live notifier's first-delivery wait; Python 3.13 was cancelled by matrix
+fail-fast, as confirmed by the check annotation. The earlier label and server
+startup failures no longer appear.
+
+The cleanup correction changes tests and documentation only. Native and forced
+missing-capability cases now cover planning and apply separately, requiring
+supported traversal to succeed and unsupported traversal to preserve payloads,
+report zero freed bytes, write no cleaned markers and leak no descriptors.
+All 159 storage/API tests and all 54 safety tests with search flags unavailable
+pass. Removing those flags reproduces exactly the seven CI failures; the runner
+did not record its flags, so this remains an inferred environment difference.
+
+The SMTP client now uses its connected socket's numeric local address for EHLO,
+avoiding implicit local machine-name DNS outside the socket timeout. A controlled
+resolver stall reproduced the exact live notification wait; the correction passes
+that full acceptance test without increasing timeouts. Remote hostname resolution
+and TLS hostname verification still use the configured server. Independent probes
+cover IPv4, IPv6, all three security modes, TLS identity rejection and cleanup
+capability mutation tests. All 133 notification, live acceptance and secret-leak
+regressions pass on each of Python 3.11 and 3.13. Ruff, formatting, source ty and
+Sphinx pass. Independent review is **LGTM** with 11 fresh probes. Parent verified
+eight source hashes, 16 supporting evidence hashes, 10 review artifacts and the
+exact reviewed diff. The verbatim receipt is
+`2026-10-17-hypothex-phase3-macos-followup-review.md`, SHA256
+`c987ade73121ab206fd0a7430af0bba21d0e90dcac3c546e58c216a72a11614e`.
+The fresh SMTP candidate passed all five installed-package checks in 180.47s,
+including 20 browser executions. Parent verified 108 build-input hashes,
+79 unchanged harness inputs, 104 source/resource members in both archives and
+the forced skill. Cleanup stopped all 12 owned servers and two descendants,
+with no remaining processes or failures. Evidence is
+`implementation/package/pr27-smtp-final/`; wheel SHA256 is
+`6feeac984a9275ef9f5fd59a8f5be3db092be554152dd404cd1a8b2921d8f22c`.
+This supersedes earlier candidates for the changed SMTP source. Merge remains
+blocked until the corrected head passes CI, followed by clean merged-main
+acceptance and the final testing handoff.
+
+PR27 opened at `96ffd74932038e5ad0ce0789673436911026c0a9`. Its automated
+review identified two additional storage defects: excluded overlapping artifacts
+could be deleted, and shared-path deduplication omitted other runs' cleanup
+bookkeeping. Both were independently reproduced and corrected. Cleanup now
+preserves all selected associations, refuses excluded or newly added overlapping
+bindings, and counts physical deletion roots once. The focused review additionally
+found alias-retarget bookkeeping and remote byte-confirmation defects. Grouped
+deletion revalidates member identity; remote preflight refuses mismatched lexical
+and physical groups or removal roots. All 27 independent probes pass on storage
+source SHA256 `c282d9969fb93667c7f43af42c3f0c27448cbd16cd1056154b33fb928adc1a0f`.
+The final affected suite passed 273 tests, including seven real HTTP cases.
+The focused independent review is **LGTM**, with all seven reviewed source hashes
+and 22 evidence hashes verified by the parent. Its verbatim receipt is
+`2026-10-17-hypothex-phase3-storage-review.md`, SHA256
+`3419a0c1ad2fbeba4ce3108c30b084450db82283d4cc73eb7e7fa50b2d84b1ad`.
+The shared-owner UI regression is included in 23 passing affected UI tests;
+TypeScript, production build, Ruff, formatting, ty and Sphinx all pass.
+The rebuilt final candidate passed all five installed checks in 181.40 seconds,
+including 20 browser executions. Parent verified 108 source/resource hashes,
+79 harness hashes, 104 wheel members, the forced skill and both archives.
+Its wheel SHA256 is
+`152593c58c0c52459e86a16f73ef8508c645b6428360990a34fc65a25140e3c7`.
+All 12 owned servers and two tracked descendants were stopped; zero remained.
+This candidate records the reviewed dirty source tree above the original PR27
+head. It supersedes both older package candidates below. The previous
+implementation LGTM below is historical evidence; merge remains pending
+new-head CI, followed by the clean merged-main handoff.
+
+The old `96ffd749` UI CI run exposed an intermittent delayed-chart test cleanup
+race (`route.fulfill: Route is already handled!`). A staggered two-request probe
+reproduced the failure and verified the correction: drain each callback promise
+before unregistering interception. The selected-run assertions, retries, worker
+count and timeouts are unchanged. The corrected test passed 20 focused executions,
+then all 124 browser tests passed with CI's two workers and zero retries.
+Application typecheck and diff checks passed. Parent inspected the fix and raw
+receipts in `implementation/ci-ui-selected-run/`; all 108 package inputs and
+79 package-test inputs still match the accepted candidate, so package validation
+is reused. Hosted CI on the next pushed head remains required.
+
+The old macOS Python 3.13 CI run exposed three further failure paths. Generated
+host labels exceeded the API limit after adding their prefix; the complete label
+now fits 64 characters. The demo webhook and SMTP test fixture implicitly called
+reverse DNS during startup; both now use explicit local server identities.
+Blocked-resolver probes reproduce the historical timeout mechanisms, though the
+old runner did not capture resolver stacks. Failed SMTP fixture startup now also
+releases its listener, thread and loop. The Python 3.11 matrix job was cancelled
+by fail-fast after the 3.13 failure, as confirmed by its check annotation.
+The affected CLI/demo subset passed 81 tests on isolated macOS Python 3.13;
+notification/acceptance/secret-leak coverage passed 123 tests on each of Python
+3.11 and 3.13. Seven independent guarded probes passed and the focused review is
+**LGTM**. Parent verified eight reviewed file hashes and 13 evidence hashes;
+the verbatim receipt is `2026-10-17-hypothex-phase3-macos-review.md`, SHA256
+`821e8e976fbf3c1bc33f170750b13cc2c8e1124fc77aac228d6a067849897d49`.
+Ruff, formatting, ty, Sphinx and the dedicated browser-test typecheck pass.
+The fresh installed candidate passed all five checks in 180.85 seconds, including
+20 browser executions. Parent verified all 108 build-input and 79 harness hashes,
+104 source/resource members in both archives, and the force-included skill.
+All 12 owned servers and two tracked descendants were stopped; zero remained.
+The wheel SHA256 is
+`2ca0042858da4e365e2331e7f2f78bee70f015559e3319cb7683363904e90e24`.
+Evidence is `implementation/package/pr27-macos-final/`; the prior storage candidate
+is historical evidence for its earlier source. Current-head CI and the clean
+merged-main handoff remain required.
+
+All 13 scope items are implemented. The independent whole-source review has no
+remaining runtime findings after fixing duplicate execution on completed legacy
+receipts and the browser device-name length mismatch. The final independent
+verdict is **LGTM**, including the final installed-package artifacts. Parent
+verified all 343 reviewed file hashes and all 28 evidence hashes. The verbatim
+report is committed as `2026-10-17-hypothex-phase3-implementation-review.md`;
+its SHA256 is `53029efdb2a25fdead262ac22e3ed44bf7281a6ce9a23fc94f9f8bc10015cdc1`.
+Separate independent reviews
+verified fixes for pairing-error secret reflection, protected pulled-copy deletion,
+and partial SMTP recipient handling. Historical source hashes and probe limits
+are retained in the durable evidence directory; earlier receipts do not silently
+cover later source changes.
+
+Local evidence includes 24 actual Docker tests (including 13 PostgreSQL cases),
+1510 UI unit tests, successful TypeScript/production build, 122 existing browser
+cases and 28 final affected cases, and passing Ruff/format/ty/Sphinx checks.
+The full Python suite passed 3675 tests with 3 macOS-only `flock` skips and
+24 deselections. This run excluded package-harness tests; the later legacy-completed-receipt change
+has 138 affected tests and six independent probes. Final seven-job CI, merge,
+and the clean-merged-main installed-package handoff remain required.
+The installed candidate passed all five checks in 191.71 seconds, including 20
+light/dark browser executions. All 12 owned servers and two tracked descendants
+were stopped; zero remained. Its wheel hash is
+`419c184c02562ee6eccd20b624a55060642735f83e4d98d0df35be047f9b345a`.
+The candidate records a dirty source tree separately from base HEAD; it is not
+a clean build of the base commit. Parent verified all 108 source/resource hashes,
+104 packaged source/resource byte identities, the force-included skill, and both
+archive hashes. The clean merged-main handoff remains required. Existing branches
+and worktrees are retained.
+
 ## Boundaries
 
-No runtime implementation until both review gates pass. Use uv, Ruff, ty, pytest,
+Both review gates passed as recorded above. Use uv, Ruff, ty, pytest,
 Sphinx and Bun. Never edit tracked files or commit in the main checkout. Never
 touch `~/.ssh` or connect to real SSH/SLURM hosts, Slack, SMTP, Tailscale or external
 Postgres. Use loopback fakes and throwaway Docker containers. Real deployment,
@@ -53,8 +237,8 @@ real notifications and first public exposure remain separate user actions.
 No attribution trailers or model/tool references in commit messages or PR text.
 
 Historical review receipts and prompts used `/tmp/hx-phase3-evidence/`; that temporary location is not the current evidence source. The October 16 durable receipts are under `/Users/shreyasv/Desktop/code/hypothex-phase3-evidence/2026-10-16/` (outside source trees).
-This plan records authorization and progress; it does not claim either review
-gate or any Phase 3 implementation has passed yet.
+The historical entries below retain their original status at the time. The current
+gate status and active work are recorded above; runtime completion is still pending.
 
 ## Historical review cycle before the October 16 main refresh
 
@@ -301,8 +485,8 @@ adversarial round. No Phase 3 runtime implementation has started.
 - [x] Preserve schema-3 a444125/schema-4 e73b810 fixture provenance and all scope.
 - [x] Check all 51 frontend anchors and absence of runtime diff versus new main.
 - [x] Require delayed-chart visibility/user-takeover regressions in Task24.
-- [ ] Obtain renewed full-plan Claude R5 LGTM on the frozen input.
-- [ ] Obtain new independent adversarial R2 LGTM on the same input.
+- [x] Obtain renewed full-plan Claude R5 LGTM on the frozen input.
+- [x] Obtain new independent adversarial R2 LGTM on the same input.
 
 The empty-PG correction remains the previously verified exact guard. The UI
 baseline fix is fully tested independently; no unchanged application suite was

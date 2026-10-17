@@ -27,14 +27,17 @@ export function RunHeader({ ctx, tab }: { ctx: RunContext; tab: RunTab }) {
         <span className={`pill ${state}`}>
           <StatusIcon status={state} label={pillWord(state)} />
         </span>
+        {record.owner && <span className="muted">@{record.owner}</span>}
         <span className="sp" />
         <RunActions
           record={record}
           phase={ctx.phase}
           hostName={ctx.host?.name ?? null}
+          hostRepair={ctx.host?.state.state==="error" && /auth.*failed|authentication failed/i.test(ctx.host.state.message) ? ctx.host.state.message : null}
           served={ctx.detail.served === true}
           hostsLoaded={ctx.hostsLoaded}
           inferStage={ctx.inferStage}
+          cleaned={ctx.detail.cleaned}
           compareHref={ctx.compareHref}
         />
       </div>

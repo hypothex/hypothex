@@ -186,6 +186,7 @@ export function makeSummary(
     best: CELL_D,
     headline: "lr 3e-4, beam 10: 0.912 top1, +0.008 over beam 5",
     total_usd: 12.5,
+    cost_complete:true,
     ...over,
   } as unknown as SweepSummary;
 }

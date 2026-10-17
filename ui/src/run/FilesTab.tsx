@@ -47,7 +47,7 @@ export function FilesTab({ ctx }: { ctx: RunContext }) {
       {training ? (
         <section aria-label="Checkpoints">
           <h3>Checkpoints</h3>
-          <CheckpointTable artifacts={record.artifacts} />
+          <CheckpointTable artifacts={record.artifacts} environmentId={record.environment_id} cleaned={detail.cleaned} />
         </section>
       ) : null}
     </div>

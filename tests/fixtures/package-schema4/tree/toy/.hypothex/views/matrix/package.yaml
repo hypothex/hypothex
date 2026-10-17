@@ -1,0 +1,6 @@
+title: Package comparison
+panels:
+  - type: compare
+    title: Across datasets
+    data: {datasets: [set-1, set-0], model: m-a, metrics: [top1]}
+    render: bars

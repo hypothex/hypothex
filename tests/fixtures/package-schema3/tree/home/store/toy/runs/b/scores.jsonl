@@ -1,0 +1,1 @@
+{"metric":"accuracy","version":"v1","key":"value","value":1.0,"error":null,"source_hash":"sha256:30bca6684e8b747a","per_example_hash":"sha256:da381988a1793f8e55dd5ed42077d51a3d76c75e750ca2d6bd30be1820b77d0a","evaluation_examples":4,"evaluation_ids_hash":"sha256:903a03ca18c11fedb2d6fc7aaee555f9732e525a680044d1bba28ae8209d3f23","created_at":"2026-10-06T12:00:00Z"}

@@ -110,3 +110,19 @@ SLURM jobs, cost today).
 `stdout`/`stderr`, `predictions`, `env`, `dataset:<name>` (host:path),
 `artifact:<kind>:<i>` (host:path). Everything under `run_dir` is plain YAML/JSONL
 you can read directly.
+
+## Team and output
+
+- Paper table: `hx export <task> --format latex --json` (also `markdown`, `csv`;
+  `--noise seed|test|both`). Compare runs: `hx export --runs a,b --json`.
+  Use `--primary latency/p95` to rank a task table by another metric; compare
+  export rejects `--primary`. MCP `export_table` accepts the same optional
+  `primary` and defaults to the configured task primary.
+  MCP: `export_table`, `export_compare`, `get_baselines`.
+- Write what you learned to the project notebook, linking runs as `[[run:<id>]]`:
+  `hx note --project <project> "<finding> [[run:<id>]]" --json`. Read it with
+  `hx notebook show -p <project> --json`. MCP: `get_notebook`, `add_notebook_entry`.
+- The week: `hx digest -p <project> --json`. MCP: `get_digest`. `whoami` tells who you act as.
+- Never apply a storage cleanup. You may look (`hx storage report --json`, MCP
+  `storage_report`) and plan (`hx storage clean --archived --json`, MCP
+  `plan_storage_clean`); a person applies the plan.

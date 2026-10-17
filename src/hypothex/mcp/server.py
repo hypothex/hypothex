@@ -4,23 +4,33 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 import json
 import logging
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar
+from datetime import timedelta
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import urlencode, urlsplit
 
 import httpx
 import yaml
 
 from hypothex.api.security import is_loopback_bind
+from hypothex.auth.client import hub_login
+from hypothex.auth.ownership import require_act, require_local_exec
+from hypothex.auth.scopes import Scope, covers
+from hypothex.auth.store import LOCAL_OWNER, Principal
 from hypothex.core import control
+from hypothex.core import digest as core_digest
+from hypothex.core import export as core_export
+from hypothex.core import notebook as core_notebook
 from hypothex.core import panels as core_panels
 from hypothex.core import queries as q
+from hypothex.core import storage as core_storage
 from hypothex.core import sweeps as core_sweeps
 from hypothex.core import views as core_views
 from hypothex.core.config import load_project_config, parse_metric_version
@@ -35,11 +45,12 @@ from hypothex.core.errors import (
 )
 from hypothex.core.evaluation import reeval
 from hypothex.core.execution import RunRequest
-from hypothex.core.ids import new_command_id
+from hypothex.core.ids import new_command_id, utcnow
 from hypothex.core.jsonutil import to_jsonable
-from hypothex.core.layout import default_home
+from hypothex.core.layout import Layout, default_home
 from hypothex.core.naming import clean_run_name
 from hypothex.core.records import RunRecord, RunStatus
+from hypothex.core.settings import load_settings
 from hypothex.core.store import ProjectEntry
 from hypothex.core.sweeps import SweepParam, SweepSpec, load_sweep, summarize_sweep, sweep_path
 from hypothex.core.tokens import redact_bearer_token, validate_bearer_token
@@ -140,6 +151,10 @@ param; runs get $HYPOTHEX_SEED, or use {seed}); list_sweeps, get_sweep, cancel_s
 A durable sweep POST returns an accepted receipt: inspect get_sweep.issuance for
 current state. Issued does not mean the experiments finished. pull_artifact copies a big
 file such as a checkpoint from a host to the hub; connect_host retries a host in error.
+Team: export_table / export_compare give LaTeX, Markdown, or CSV for a paper;
+get_notebook and add_notebook_entry read and write the lab notebook; get_digest
+summarizes a week; whoami reports your principal. Storage report and planning
+tools only show and plan; never delete.
 """
 
 COMPACT_RUN_FIELDS = {
@@ -161,6 +176,7 @@ COMPACT_RUN_FIELDS = {
     "starred",
     "name",
     "created_by",
+    "owner",
     "environment_id",
 }
 """The default list_runs row; full=True also returns commands, config and artifacts."""
@@ -573,7 +589,8 @@ def resolve_hub_token(url: str | None = None, home: Path | None = None) -> str |
     """
     Return the bearer token to send to the hub at ``url``.
 
-    ``$HYPOTHEX_HUB_TOKEN`` wins. Else, when ``url`` is a loopback address, the
+    ``$HYPOTHEX_HUB_TOKEN`` wins, then the saved ``hub-tokens.json`` login for
+    that URL. Else, when ``url`` is a loopback address, use the
     token in ``<home>/serve/server.json`` of the server on that port: the hub's
     own record, readable only by its owner. A token is never read from that
     file for a hub on another machine, so it cannot leak there.
@@ -600,7 +617,11 @@ def resolve_hub_token(url: str | None = None, home: Path | None = None) -> str |
     given = os.environ.get("HYPOTHEX_HUB_TOKEN")
     if given:
         return given
-    parts = urlsplit(url or hub_url())
+    base = (url or hub_url()).rstrip("/")
+    login = hub_login(Layout(home or default_home()), base)
+    if login is not None:
+        return login.token.get_secret_value()
+    parts = urlsplit(base)
     try:
         port = parts.port
     except ValueError:
@@ -662,6 +683,8 @@ def hub_call(
     url: str | None = None,
     timeout: float = 120.0,
     token: TokenChoice = None,
+    text: bool = False,
+    agent: str | None = None,
 ) -> Any:
     """
     Call the hub's HTTP API and return the decoded JSON answer.
@@ -681,6 +704,10 @@ def hub_call(
         Seconds to wait for the answer.
     token : str, optional
         Bearer token for a hub that requires one; defaults to ``resolve_hub_token(url)``.
+    text : bool
+        Return the response body as text (exports), rather than JSON.
+    agent : str, optional
+        Agent attribution header; defaults to ``HYPOTHEX_AGENT``.
 
     Returns
     -------
@@ -710,6 +737,9 @@ def hub_call(
     if auth is not None:
         auth = validate_bearer_token(auth)
     headers = {"Authorization": f"Bearer {auth}"} if auth else {}
+    acting = agent if agent is not None else os.environ.get("HYPOTHEX_AGENT")
+    if acting:
+        headers["X-Hypothex-Agent"] = acting
     try:
         if body is None and method.upper() != "GET":
             body = {}
@@ -726,23 +756,23 @@ def hub_call(
             f"the hub at {base} did not answer ({type(exc).__name__}); start it with `hx serve`"
         ) from None
     if resp.status_code < 400:
-        return resp.json()
+        return resp.text if text else resp.json()
     try:
         data = resp.json()
     except ValueError:
         data = {}
     message = data.get("error") if isinstance(data, dict) else None
-    text = redact_bearer_token(
+    error_text = redact_bearer_token(
         message
         if isinstance(message, str)
         else f"hub answered {resp.status_code} to {method} {path}",
         auth,
     )
     if resp.status_code == 404:
-        raise StoreError(text)
+        raise StoreError(error_text)
     if resp.status_code == 503:
-        raise HubUnavailableError(text)
-    raise HypothexError(text)
+        raise HubUnavailableError(error_text)
+    raise HypothexError(error_text)
 
 
 def is_remote(host: str | None) -> bool:
@@ -1022,7 +1052,7 @@ def host_states(
             out[env] = "stale"
             continue
         if auth is None:
-            auth = resolve_hub_token(url, ctx.layout.home)
+            auth = resolve_hub_token(url, ctx.layout.home) or NO_AUTH_TOKEN
         query = urlencode({"environment_id": env, "archived": "true", "limit": 1})
         try:
             rows = hub_call(
@@ -1255,7 +1285,9 @@ def sweep_summary(
         spec = find_sweep(ctx, sweep_id, project)
     except StoreError:
         path = f"/api/v1/sweeps/{project}/{sweep_id}" if project else f"/api/v1/sweeps/{sweep_id}"
-        auth = resolve_hub_token(url, ctx.layout.home) if token is None else token
+        auth = (
+            (resolve_hub_token(url, ctx.layout.home) or NO_AUTH_TOKEN) if token is None else token
+        )
         return hub_call("GET", path, url=url, token=auth)
     return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
 
@@ -1357,6 +1389,193 @@ def _expose_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+F = TypeVar("F", bound=Callable[..., Any])
+TOOL_SCOPE_ATTR = "__hx_scope__"
+_CTX_PARAM = "hx_mcp_ctx"
+_ACTING: ContextVar[Principal | None] = ContextVar("hx_mcp_acting", default=None)
+_CALLER: ContextVar[Principal] = ContextVar("hx_mcp_caller", default=LOCAL_OWNER)
+_OVER_HTTP: ContextVar[bool] = ContextVar("hx_mcp_over_http", default=False)
+
+
+@contextlib.contextmanager
+def acting_as(principal: Principal) -> Iterator[None]:
+    """
+    Run in-process tool calls (tests, stdio) as ``principal``.
+
+    Parameters
+    ----------
+    principal : Principal
+
+    Yields
+    ------
+    None
+    """
+    token = _ACTING.set(principal)
+    try:
+        yield
+    finally:
+        _ACTING.reset(token)
+
+
+def caller() -> Principal:
+    """
+    Return the principal of the tool call being served.
+
+    Returns
+    -------
+    Principal
+    """
+    return _CALLER.get()
+
+
+def caller_token() -> str | None:
+    """
+    Return the caller's credential over HTTP, so a tool's hub calls act as the caller.
+
+    Returns
+    -------
+    str or None
+        The exact bearer or cookie credential the guard authenticated; None
+        in-process, over stdio, or for an HTTP caller with no selected credential.
+    """
+    selected = _caller_token.get()
+    return selected if isinstance(selected, str) else None
+
+
+def _request_of(mcp_ctx: Any) -> Any:
+    if mcp_ctx is None:
+        return None
+    try:
+        return mcp_ctx.request_context.request
+    except (ValueError, AttributeError, LookupError):
+        return None
+
+
+def _principal_from(request: Any) -> Principal:
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        found = scope.get("hx.principal")
+        if isinstance(found, Principal):
+            return found
+    if request is not None:
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        raise ToolError("401 · authenticated principal needed")
+    acting = _ACTING.get()
+    return acting if acting is not None else LOCAL_OWNER
+
+
+def _credential_from(request: Any) -> str | None:
+    # Forward exactly the credential AuthGuard/TokenGuard authenticated, not a second
+    # interpretation of the headers. A rejected bearer can coexist with a valid cookie.
+    scope = getattr(request, "scope", None)
+    found = scope.get("hypothex.auth_token") if isinstance(scope, dict) else None
+    return found if isinstance(found, str) and found else None
+
+
+def tool_hub_token(fallback: Callable[[], TokenChoice]) -> TokenChoice:
+    """
+    Choose the bearer token a tool's own hub calls send.
+
+    Parameters
+    ----------
+    fallback : callable
+        The server's token (``hub_token`` or ``resolve_hub_token``); used only
+        for in-process and stdio calls.
+
+    Returns
+    -------
+    TokenChoice
+        The selected credential or explicit ``NO_AUTH_TOKEN`` over HTTP;
+        only a missing in-process/stdio choice invokes the fallback.
+    """
+    selected = _caller_token.get()
+    return selected if selected is not None else fallback()
+
+
+def scoped(scope: Scope) -> Callable[[F], F]:
+    """
+    Declare the scope an MCP tool needs, and check it on every call.
+
+    The wrapper adds a hidden ``hx_mcp_ctx`` parameter (an MCP ``Context``,
+    left out of the tool's schema by the SDK) to reach the HTTP request.
+
+    Parameters
+    ----------
+    scope : {"read", "launch", "admin"}
+
+    Returns
+    -------
+    callable
+        The decorator; ``tool_scopes`` reads the scope back.
+    """
+
+    def wrap(fn: F) -> F:
+        # Tool registration is already inside build_server; CLI hub helpers stay SDK-free.
+        from mcp.server.mcpserver.context import Context as McpContext
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        signature = inspect.signature(fn, eval_str=True)
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            request = _request_of(kwargs.pop(_CTX_PARAM, None))
+            principal = _principal_from(request)
+            if not covers(principal.scope, scope):
+                raise ToolError(f"403 · {scope} scope needed; you hold {principal.scope}")
+            who = _CALLER.set(principal)
+            token = (
+                _caller_token.set(_credential_from(request) or NO_AUTH_TOKEN)
+                if request is not None
+                else None
+            )
+            over_http = _OVER_HTTP.set(request is not None)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _OVER_HTTP.reset(over_http)
+                if token is not None:
+                    _caller_token.reset(token)
+                _CALLER.reset(who)
+
+        params = list(signature.parameters.values())
+        hidden = inspect.Parameter(
+            _CTX_PARAM, inspect.Parameter.KEYWORD_ONLY, default=None, annotation=McpContext
+        )
+        wrapper.__signature__ = signature.replace(parameters=[*params, hidden])  # ty: ignore[unresolved-attribute]
+        wrapper.__annotations__ = {
+            **{p.name: p.annotation for p in params if p.annotation is not p.empty},
+            _CTX_PARAM: McpContext,
+            "return": signature.return_annotation,
+        }
+        setattr(wrapper, TOOL_SCOPE_ATTR, scope)
+        return cast(F, wrapper)
+
+    return wrap
+
+
+def tool_scopes(server: MCPServer) -> dict[str, Scope]:
+    """
+    List the declared scope of every tool of a server.
+
+    Parameters
+    ----------
+    server : MCPServer
+
+    Returns
+    -------
+    dict of str to Scope
+        Tool name to scope; tools without ``@scoped`` are absent (a test fails on them).
+    """
+    manager = getattr(server, "_tool_manager", None)
+    tools = manager.list_tools() if manager is not None else []
+    return {
+        t.name: getattr(t.fn, TOOL_SCOPE_ATTR)
+        for t in tools
+        if getattr(t.fn, TOOL_SCOPE_ATTR, None) is not None
+    }
+
+
 def _text(value: str | int | float) -> str:
     """
     Render a sweep value as text that parses back to the same value.
@@ -1436,28 +1655,52 @@ def build_server(
     def dump(obj: Any) -> Any:
         return obj.model_dump(mode="json") if hasattr(obj, "model_dump") else obj
 
+    def agent_identity(agent: str | None) -> tuple[str, str | None]:
+        # Keep the selected stdio default and optional per-call override.
+        agent = default_agent if agent is None else agent
+        principal = caller()
+        if principal.session_id is None:
+            return f"agent:{agent}", None
+        return f"agent:{agent}@{principal.user}", principal.user
+
     def auth() -> TokenChoice:
         selected = _caller_token.get()
         if selected is not None:
             return selected
-        return hub_token if hub_token is not None else resolve_hub_token(hub_url, ctx().layout.home)
+        if hub_token is not None:
+            return hub_token
+        return resolve_hub_token(hub_url, ctx().layout.home) or NO_AUTH_TOKEN
 
     def hub(
-        method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 120.0
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        agent: str | None = None,
+        timeout: float = 120.0,
     ) -> Any:
-        return hub_call(method, path, body, url=hub_url, token=auth(), timeout=timeout)
+        # Each MCP call identifies the configured default or its explicit override.
+        acting = default_agent if agent is None else agent
+        return hub_call(
+            method,
+            path,
+            body,
+            url=hub_url,
+            token=auth(),
+            agent=acting,
+            timeout=timeout,
+        )
 
     def via_hub(run_id: str, action: str, body: dict[str, Any], agent: str | None = None) -> Any:
-        # a mirrored run is acted on by its host: the hub forwards it (Task 45)
         if not acts_through_hub(ctx(), run_id):
             return None
         full = {**body, "command_id": new_command_id(), "created_by": actor(agent)}
         try:
-            return hub("POST", f"/api/v1/runs/{run_id}/{action}", full)
+            return hub("POST", f"/api/v1/runs/{run_id}/{action}", full, agent=agent)
         except HubUnavailableError as exc:
             raise missing_run_or_hub_error(ctx(), run_id, exc) from exc
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def list_projects() -> dict[str, Any]:
         """List projects with their repo paths and task names."""
@@ -1469,18 +1712,21 @@ def build_server(
         }
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def list_tasks(project: str | None = None) -> dict[str, Any]:
         """List tasks: dataset@version, metric versions, primary metric, run count, best."""
         return {"tasks": [dump(t) for t in q.list_tasks(ctx(), project)]}
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def get_task(task: str, project: str | None = None) -> dict[str, Any]:
         """Show a task's dataset (path, version), metrics (fn, version), stages, and repo."""
         return q.get_task(ctx(), task, project)
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def get_leaderboard(
         task: str, project: str | None = None, metric: list[str] | None = None
@@ -1518,6 +1764,7 @@ def build_server(
         return out
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def list_runs(
         project: str | None = None,
@@ -1557,6 +1804,7 @@ def build_server(
         return {"runs": rows}
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def get_run(run_id: str) -> dict[str, Any]:
         """
@@ -1576,6 +1824,7 @@ def build_server(
         return out
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def get_logs(
         run_id: str, stream: str = "stderr", tail: int = 200, offset: int | None = None
@@ -1618,6 +1867,7 @@ def build_server(
         return result
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def compare_examples(a: str, b: str, metric: str, field: str = "correct") -> dict[str, Any]:
         """Compare paired examples for two run IDs; metric accepts name@version.
@@ -1633,6 +1883,7 @@ def build_server(
         return result
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def compare_runs(run_ids: list[str]) -> dict[str, Any]:
         """
@@ -1648,6 +1899,7 @@ def build_server(
         return out
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def launch_run(
         repo: str,
@@ -1677,7 +1929,7 @@ def build_server(
         params is recorded metadata and does not fill command slots. Built-in seed
         needs seed=; checkpoint is supplied by reinfer or template_vars.
         """
-        created_by = actor(agent)
+        created_by, owner = agent_identity(agent)
         require_agent_hypothesis(created_by, hypothesis)
         slurm = {
             k: v
@@ -1702,9 +1954,14 @@ def build_server(
                 "queue": queue,
                 "slurm": slurm or None,
                 "created_by": created_by,
+                "owner": owner,
                 "command_id": new_command_id(),
             }
-            return {"run": hub("POST", f"/api/v1/hosts/{host}/runs", body), "host": host}
+            return {
+                "run": hub("POST", f"/api/v1/hosts/{host}/runs", body, agent=agent),
+                "host": host,
+            }
+        require_local_exec(caller())
         record = control.launch_run(
             ctx(),
             RunRequest(
@@ -1718,6 +1975,7 @@ def build_server(
                 params=params or {},
                 vars=template_vars or {},
                 created_by=created_by,
+                owner=owner,
                 gpus=gpus,
                 queue=queue,
             ),
@@ -1725,15 +1983,19 @@ def build_server(
         return {"run": dump(record), "run_dir": str(ctx().run_dir(record))}
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def rerun(run_id: str, agent: str | None = None) -> dict[str, Any]:
         """Rerun with the same command, commit (via worktree if needed), config, and seed."""
         out = via_hub(run_id, "rerun", {}, agent)
         if out is not None:
             return {"run": out}
-        return {"run": dump(control.rerun(ctx(), run_id, created_by=actor(agent)))}
+        require_local_exec(caller())
+        created_by, owner = agent_identity(agent)
+        return {"run": dump(control.rerun(ctx(), run_id, created_by=created_by, owner=owner))}
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def reinfer(
         run_id: str,
@@ -1745,15 +2007,23 @@ def build_server(
         out = via_hub(run_id, "reinfer", {"checkpoint": checkpoint, "vars": vars or {}}, agent)
         if out is not None:
             return {"run": out}
+        require_local_exec(caller())
+        created_by, owner = agent_identity(agent)
         return {
             "run": dump(
                 control.reinfer(
-                    ctx(), run_id, checkpoint=checkpoint, vars=vars, created_by=actor(agent)
+                    ctx(),
+                    run_id,
+                    checkpoint=checkpoint,
+                    vars=vars,
+                    created_by=created_by,
+                    owner=owner,
                 )
             )
         }
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def reevaluate(
         run_id: str | None = None,
@@ -1785,29 +2055,35 @@ def build_server(
                 "created_by": actor(agent),
             }
             path = f"/api/v1/tasks/{entry.project}/{name}/reeval"
-            return hub("POST", path, body, timeout=TASK_REEVAL_SECONDS)
+            return hub("POST", path, body, agent=agent, timeout=TASK_REEVAL_SECONDS)
         return dump(reeval(c, project=entry.project, task=name, metric=metric, force=force))
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def stop_run(run_id: str, agent: str | None = None) -> dict[str, Any]:
         """Stop a queued or running run."""
         out = via_hub(run_id, "stop", {}, agent)
         if out is not None:
             return {"run": out}
-        return {"run": dump(control.stop_run(ctx(), run_id))}
+        c = ctx()
+        require_act(caller(), c.find_record(run_id).owner, "stop")
+        return {"run": dump(control.stop_run(c, run_id))}
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def add_note(
         run_id: str, text: str, author: str = "agent", agent: str | None = None
     ) -> dict[str, Any]:
         """Append a Markdown note to a run (findings, next steps)."""
-        if via_hub(run_id, "notes", {"text": text, "author": author}, agent) is None:
-            q.add_note(ctx(), run_id, text, author)
+        writer = agent_identity(agent)[0] if caller().session_id else author
+        if via_hub(run_id, "notes", {"text": text, "author": writer}, agent) is None:
+            q.add_note(ctx(), run_id, text, writer)
         return {"ok": True}
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def tag_run(
         run_id: str,
@@ -1822,6 +2098,7 @@ def build_server(
         return {"run": dump(q.tag_run(ctx(), run_id, add or [], remove or []))}
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def rename_run(run_id: str, name: str | None, agent: str | None = None) -> dict[str, Any]:
         """
@@ -1836,6 +2113,7 @@ def build_server(
         return {"run": dump(q.rename_run(ctx(), run_id, clean))}
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def get_predictions(
         run_id: str,
@@ -1857,18 +2135,21 @@ def build_server(
         )
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def list_views(task: str, project: str | None = None) -> dict[str, Any]:
         """List a task's views (dashboards): preset `overview`, inline views, view files."""
         return {"views": [dump(v) for v in list_task_views(ctx(), task, project)]}
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def get_view(task: str, name: str, project: str | None = None) -> dict[str, Any]:
         """Read one view: info (origin, path), its YAML text, and the resolved view."""
         return view_document(ctx(), task, name, project)
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def add_view(
         task: str, name: str, yaml_text: str, project: str | None = None
@@ -1884,12 +2165,14 @@ def build_server(
             return {"ok": False, "error": str(exc), "issues": to_jsonable(exc.issues)}
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def query_view(task: str, name: str, project: str | None = None) -> dict[str, Any]:
         """Compute a saved view's panels as rows (the same data the UI draws)."""
         return query_task_view(ctx(), task, project=project, name=name)
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def list_hosts() -> dict[str, Any]:
         """
@@ -1900,6 +2183,7 @@ def build_server(
         return {"hosts": hub("GET", "/api/v1/hosts")}
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def connect_host(name: str, agent: str | None = None) -> dict[str, Any]:
         """
@@ -1907,9 +2191,10 @@ def build_server(
         its new connection state. Its runs keep going there either way.
         """
         body = {"command_id": new_command_id(), "created_by": actor(agent)}
-        return {"state": hub("POST", f"/api/v1/hosts/{name}/connect", body)}
+        return {"state": hub("POST", f"/api/v1/hosts/{name}/connect", body, agent=agent)}
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def launch_sweep(
         project: str,
@@ -1936,7 +2221,8 @@ def build_server(
         accepted/queued receipt, not finished work; call get_sweep for current
         issuance. counts always counts observed member runs, not planned cells.
         """
-        require_agent_hypothesis(actor(agent), hypothesis)
+        created_by, owner = agent_identity(agent)
+        require_agent_hypothesis(created_by, hypothesis)
         params = [SweepParam(name=k, values=[_text(v) for v in vs]) for k, vs in grid.items()]
         params += parse_ranges([f"{k}={v}" for k, v in (ranges or {}).items()])
         if is_remote(host):
@@ -1952,12 +2238,14 @@ def build_server(
                 "hypothesis": hypothesis,
                 "gpus": gpus,
                 "queue": queue,
-                "created_by": actor(agent),
+                "created_by": created_by,
+                "owner": owner,
                 "command_id": new_command_id(),
             }
-            return hub("POST", "/api/v1/sweeps", body)
+            return hub("POST", "/api/v1/sweeps", body, agent=agent)
         # the sweep stores its code, so an extend runs the same commit and diff
         commit, diff = sweep_pin(ctx(), project, repo)
+        require_local_exec(caller())
         summary = core_sweeps.launch_sweep(
             ctx(),
             project=project,
@@ -1969,7 +2257,8 @@ def build_server(
             hypothesis=hypothesis,
             gpus=gpus,
             queue=queue,
-            created_by=actor(agent),
+            created_by=created_by,
+            owner=owner,
             repo=Path(repo) if repo is not None else None,
             commit=commit,
             diff=diff,
@@ -1977,6 +2266,7 @@ def build_server(
         return dump(summary)
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def list_sweeps(project: str | None = None) -> dict[str, Any]:
         """Sweeps of one project (or all): id, created_at, observed n_runs, best, issuance.
@@ -1986,6 +2276,7 @@ def build_server(
         return {"sweeps": to_jsonable(q.list_sweeps(ctx(), project))}
 
     @mcp.tool()
+    @scoped("read")
     @_expose_errors
     def get_sweep(project: str, sweep_id: str) -> dict[str, Any]:
         """Current sweep summary, observed run counts, cells, cost and durable issuance.
@@ -1996,6 +2287,7 @@ def build_server(
         return sweep_summary(ctx(), sweep_id, project, url=hub_url, token=auth())
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def cancel_sweep(project: str, sweep_id: str, agent: str | None = None) -> dict[str, Any]:
         """Stop queued members and request an active durable issuer to stop future launches.
@@ -2007,10 +2299,14 @@ def build_server(
         spec, here = locate_sweep(c, sweep_id, project, url=hub_url, token=auth())
         if sweep_acts_through_hub(c, spec, here):
             body = {"command_id": new_command_id(), "created_by": actor(agent)}
-            return hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body)
+            return hub(
+                "POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/cancel_queued", body, agent=agent
+            )
+        require_act(caller(), spec.owner, "cancel_queued")
         return dump(core_sweeps.cancel_queued(c, spec.project, spec.id))
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def extend_sweep(
         project: str, sweep_id: str, seeds: list[int], agent: str | None = None
@@ -2026,10 +2322,12 @@ def build_server(
         spec, here = locate_sweep(c, sweep_id, project, url=hub_url, token=auth())
         if sweep_acts_through_hub(c, spec, here):
             body = {"seeds": seeds, "command_id": new_command_id(), "created_by": actor(agent)}
-            return hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/extend", body)
+            return hub("POST", f"/api/v1/sweeps/{spec.project}/{spec.id}/extend", body, agent=agent)
+        require_local_exec(caller())
         return dump(core_sweeps.extend_sweep(c, spec.project, spec.id, seeds))
 
     @mcp.tool()
+    @scoped("launch")
     @_expose_errors
     def pull_artifact(
         run_id: str, artifact: str = "checkpoint", agent: str | None = None
@@ -2040,6 +2338,247 @@ def build_server(
         Returns {local_path}.
         """
         body = {"artifact": artifact, "command_id": new_command_id(), "created_by": actor(agent)}
-        return hub("POST", f"/api/v1/runs/{run_id}/pull", body)
+        return hub("POST", f"/api/v1/runs/{run_id}/pull", body, agent=agent)
+
+    @mcp.tool()
+    @scoped("read")
+    @_expose_errors
+    def export_table(
+        task: str,
+        format: str = "markdown",
+        project: str | None = None,
+        metrics: list[str] | None = None,
+        noise: str = "both",
+        digits: int = 3,
+        primary: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Export a task's leaderboard as LaTeX, Markdown, or CSV for a paper.
+
+        Parameters
+        ----------
+        task : str
+            Task name or project/task.
+        format : str
+            Output format: markdown, latex, or csv.
+        project : str, optional
+            Project to restrict lookup to.
+        metrics : list of str, optional
+            Metric keys included in the output.
+        noise : str
+            Seed, test, both, or no uncertainty intervals.
+        digits : int
+            Numeric precision.
+        primary : str, optional
+            Metric controlling ranking, independently of exported metric columns.
+
+        Returns
+        -------
+        dict
+            Exported table in the ``text`` field.
+        """
+        opts = core_export.ExportOptions.model_validate(
+            {
+                "format": format,
+                "metrics": metrics,
+                "primary": primary,
+                "noise": noise,
+                "digits": digits,
+            }
+        )
+        return {"text": core_export.export_task(ctx(), task, project, opts)}
+
+    @mcp.tool()
+    @scoped("read")
+    @_expose_errors
+    def export_compare(run_ids: list[str], format: str = "markdown") -> dict[str, Any]:
+        """
+        Export 2-20 runs side by side at current metric versions.
+
+        Parameters
+        ----------
+        run_ids : list of str
+            Individual run identifiers.
+        format : str
+            Output format: markdown, latex, or csv.
+
+        Returns
+        -------
+        dict
+            Exported comparison in the ``text`` field.
+        """
+        opts = core_export.ExportOptions.model_validate({"format": format})
+        return {"text": core_export.export_compare(ctx(), run_ids, opts)}
+
+    @mcp.tool()
+    @scoped("read")
+    @_expose_errors
+    def get_baselines(task: str, project: str | None = None) -> dict[str, Any]:
+        """
+        Read paper baselines with version matches and deltas to the best group.
+
+        Parameters
+        ----------
+        task : str
+            Task name or project/task.
+        project : str, optional
+            Project to restrict lookup to.
+
+        Returns
+        -------
+        dict
+            Baseline rows in the ``baselines`` field.
+        """
+        board = q.get_leaderboard(ctx(), task, project, examples=False)
+        return {"baselines": [dump(b) for b in board.baselines]}
+
+    @mcp.tool()
+    @scoped("read")
+    @_expose_errors
+    def get_notebook(project: str, day: str | None = None) -> dict[str, Any]:
+        """
+        Read one day of the project's lab notebook with run chips.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        day : str, optional
+            ISO date; defaults to today in the configured hub timezone.
+
+        Returns
+        -------
+        dict
+            Serialized NotebookDay.
+        """
+        c = ctx()
+        when = core_notebook.parse_day(day) if day else core_notebook.hub_today(c)
+        return dump(core_notebook.read_day(c, project, when))
+
+    @mcp.tool()
+    @scoped("launch")
+    @_expose_errors
+    def add_notebook_entry(project: str, text: str, agent: str = "mcp") -> dict[str, Any]:
+        """
+        Append a finding to today's notebook; link runs as [[run:<id>]].
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        text : str
+            Finding in Markdown.
+        agent : str
+            Agent name, qualified with the authenticated user's identity.
+
+        Returns
+        -------
+        dict
+            Updated NotebookDay.
+        """
+        author, _ = agent_identity(agent)
+        return dump(core_notebook.append_entry(ctx(), project, text, author))
+
+    @mcp.tool()
+    @scoped("read")
+    @_expose_errors
+    def get_digest(project: str, days: int = 7) -> dict[str, Any]:
+        """
+        Summarize recent runs, cost, best changes, notes, and sweeps.
+
+        Parameters
+        ----------
+        project : str
+            Project name.
+        days : int
+            Number of days to include.
+
+        Returns
+        -------
+        dict
+            Serialized Digest.
+        """
+        end = utcnow()
+        top = load_settings(ctx().layout).digest.top_notes
+        found = core_digest.build_digest(
+            ctx(), project, since=end - timedelta(days=days), until=end, top_notes=top
+        )
+        return dump(found)
+
+    @mcp.tool()
+    @scoped("admin")
+    @_expose_errors
+    def storage_report(project: str | None = None) -> dict[str, Any]:
+        """
+        Report stored bytes by project, host, and kind.
+
+        Parameters
+        ----------
+        project : str, optional
+            Limit the report to one project.
+
+        Returns
+        -------
+        dict
+            Serialized StorageReport, using local data if the hub is unavailable.
+        """
+        path = "/api/v1/storage" + ("?" + urlencode({"project": project}) if project else "")
+        try:
+            return hub("GET", path)
+        except HubUnavailableError:
+            return dump(core_storage.storage_report(ctx(), None, project=project))
+
+    @mcp.tool()
+    @scoped("admin")
+    @_expose_errors
+    def plan_storage_clean(
+        older_than_days: int = 30, kinds: list[str] | None = None, project: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Dry-run a cleanup of archived, unstarred runs' artifacts. Never deletes: a human
+        applies the plan with `hx storage clean --apply <plan_id>`.
+
+        Parameters
+        ----------
+        older_than_days : int
+            Minimum run age.
+        kinds : list of str, optional
+            Artifact kinds; defaults to checkpoint.
+        project : str, optional
+            Limit the plan to one project.
+
+        Returns
+        -------
+        dict
+            Serialized CleanPlan. No files are deleted.
+        """
+        policy = core_storage.CleanPolicy(
+            older_than_days=older_than_days,
+            kinds=kinds or ["checkpoint"],
+            projects=[project] if project else None,
+        )
+        try:
+            return hub("POST", "/api/v1/storage/plan", policy.model_dump(mode="json"))
+        except HubUnavailableError:
+            settings = load_settings(ctx().layout).storage
+            found = core_storage.plan_clean(
+                ctx(), None, policy, created_by=agent_identity("mcp")[0], settings=settings
+            )
+            return dump(found)
+
+    @mcp.tool()
+    @scoped("read")
+    @_expose_errors
+    def whoami() -> dict[str, Any]:
+        """
+        Return the user and scope this agent acts as.
+
+        Returns
+        -------
+        dict
+            Authenticated ``user`` and ``scope``.
+        """
+        principal = caller()
+        return {"user": principal.user, "scope": principal.scope}
 
     return mcp

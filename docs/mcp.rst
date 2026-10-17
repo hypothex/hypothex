@@ -17,8 +17,9 @@ Start it
 The host tools (``list_hosts``, launches with ``host``, sweeps on a host,
 ``pull_artifact``) call the hub at ``HYPOTHEX_HUB_URL`` (default
 ``http://127.0.0.1:7777``), so ``hx serve`` must run on the hub. They send
-``HYPOTHEX_HUB_TOKEN`` when it is set; otherwise local stdio clients may discover
-the matching loopback server's credential from its private record. The MCP server
+``HYPOTHEX_HUB_TOKEN`` when it is set, then the saved login for that exact hub URL
+from ``hx login``. Otherwise local stdio clients may discover the matching
+loopback server's credential from its private record. The MCP server
 inside ``hx serve`` forwards the caller's validated credential. Missing or invalid
 caller credentials never fall back to the server's root token.
 Hub calls do not follow redirects or inherit proxy/TLS environment settings.
@@ -32,6 +33,27 @@ back as a tool error with a readable message.
 For stdio, ``HYPOTHEX_AGENT`` sets the default attribution (``mcp`` when unset).
 Mutation tools with an ``agent`` argument inherit this default when it is omitted;
 an explicit value overrides it for that call.
+
+Scopes and identity
+-------------------
+
+Every tool declares a scope. Read scope permits inspecting experiments, exporting
+tables, and reading the notebook and digest. Launch scope permits run mutations
+and notebook entries. Storage reports and cleanup plans require admin scope.
+No MCP tool applies a cleanup, sends notifications, or manages users or sessions.
+
+With scoped authentication enabled, HTTP calls use the user authenticated on each
+message, including a valid session cookie selected after a rejected bearer.
+Forwarded calls carry that exact credential and the selected agent name. They
+never fall back to the server's saved login or local admin token. A missing HTTP
+principal is refused; user-supplied arguments cannot replace the transport context.
+
+Authenticated launches record ``created_by=agent:<agent>@<user>`` and the user's
+ownership. Stdio retains ``LOCAL_OWNER`` behavior and the legacy ``agent:<agent>``
+attribution. Local execution requires admin scope because the process can read
+the server account's files. Launch collaborators run on hosts. Stopping a local
+run or cancelling a local sweep requires its owner or an admin. Forwarded command
+receipts are bound by the HTTP API to the authenticated user and operation.
 
 Tools
 -----
@@ -155,6 +177,38 @@ Views:
        ``ok: false`` comes back with ``issues``.
    * - ``query_view(task, name, project=None)``
      - A saved view's panels as rows.
+
+Team and storage:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Tool
+     - What it does
+   * - ``export_table(task, format="markdown", project=None, metrics=None,
+       noise="both", digits=3, primary=None)``
+     - Export a ranked task table as Markdown, LaTeX, or CSV. ``primary`` selects
+       ranking independently of the metric columns. Returns ``{text}``.
+   * - ``export_compare(run_ids, format="markdown")``
+     - Export 2–20 individual runs side by side. Returns ``{text}``.
+   * - ``get_baselines(task, project=None)``
+     - Paper baselines with version compatibility and deltas to the best group.
+   * - ``get_notebook(project, day=None)``
+     - Read a dated notebook page; defaults to today in the hub timezone.
+   * - ``add_notebook_entry(project, text, agent="mcp")``
+     - Append a finding attributed to the caller. ``[[run:<id>]]`` links become
+       run chips. Requires launch scope.
+   * - ``get_digest(project, days=7)``
+     - Summarize recent runs, costs, best changes, notes, and sweeps.
+   * - ``storage_report(project=None)``
+     - Report bytes locally and on hosts; admin only. Falls back to local data
+       when the hub cannot answer.
+   * - ``plan_storage_clean(older_than_days=30, kinds=None, project=None)``
+     - Create a dry-run cleanup plan; admin only. A human must separately apply
+       the plan using the CLI. This tool never deletes artifacts.
+   * - ``whoami()``
+     - Return the current caller's user and scope.
 
 Example
 -------

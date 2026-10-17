@@ -8,7 +8,7 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError, api } from "../api/client";
-import { auth } from "../api/auth";
+import { auth, type Credential } from "../api/auth";
 import type {
   HostLaunchRequest,
   HostRow,
@@ -93,9 +93,9 @@ export function launchRequest(spec: LaunchSpec, seed: number): LaunchRequest | H
 export const seedCommandId = (base: string, seed: number): string => `${base}.s${seed}`;
 
 /** Launch one seed on the spec's host. */
-export function postLaunch(spec: LaunchSpec, seed: number, commandId: string): Promise<RunRecord> {
+export function postLaunch(spec: LaunchSpec, seed: number, commandId: string, credential=auth.capture()): Promise<RunRecord> {
   const body = launchRequest(spec, seed);
-  const opts = { command_id: commandId };
+  const opts = { command_id: commandId, credential };
   return "repo" in body ? api.launch(body, opts) : api.launchOnHost(spec.host.name, body, opts);
 }
 
@@ -126,6 +126,7 @@ export interface LaunchOutcome {
 }
 
 export interface LaunchSeedsOptions {
+  credential?: Credential;
   onProgress?: (done: number) => void;
   /** Wait before retrying an unanswered request; default `ACTION_RETRY_DELAY_MS`. */
   delayMs?: number;
@@ -144,7 +145,8 @@ export async function launchSeeds(
   opts: LaunchSeedsOptions = {},
 ): Promise<LaunchOutcome> {
   const delay = opts.delayMs ?? ACTION_RETRY_DELAY_MS;
-  const generation = auth.snapshot().generation;
+  const credential=opts.credential ?? auth.capture();
+  const generation = credential.generation;
   const records: RunRecord[] = [];
   for (const seed of seeds) {
     const commandId = seedCommandId(base, seed);
@@ -152,7 +154,7 @@ export async function launchSeeds(
     for (let attempt = 0; ; attempt += 1) {
       try {
         if (!auth.current(generation)) throw new DOMException("Launch superseded", "AbortError");
-        const record = await postLaunch(spec, seed, commandId);
+        const record = await postLaunch(spec, seed, commandId, credential);
         if (!auth.current(generation)) throw new DOMException("Launch superseded", "AbortError");
         records.push(record);
         break;

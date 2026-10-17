@@ -14,10 +14,18 @@ Experiment tracker and control panel for AI researchers and their agents.
    views
    ui
    remote
+   team
+   notifications
+   export
+   storage
    gpus
    slurm
    sweeps
    cost
+   configuration
+   authentication
+   notebook
+   server
 
 .. toctree::
    :maxdepth: 2
@@ -34,3 +42,5 @@ Experiment tracker and control panel for AI researchers and their agents.
    security
    troubleshooting
    architecture
+   testing
+   package-testing

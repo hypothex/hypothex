@@ -12,6 +12,7 @@ import { useChartLabel } from "./chartLabel";
 import { fmtValue } from "./Scale";
 import { type TipRow, hideTip, showTip } from "./Tooltip";
 import "./charts.css";
+import { PaperReferenceMark } from "./Glyphs";
 
 export interface DotCIRow {
   id: string;
@@ -29,7 +30,10 @@ export interface DotCIRow {
   note?: string;
 }
 
+export interface DotCIReference { name: string; value: number; std?: number; source?: string }
+
 export interface DotCIChartProps {
+  references?: readonly DotCIReference[];
   rows: readonly DotCIRow[];
   width: number;
   band?: { lo: number; hi: number } | null;
@@ -63,11 +67,12 @@ export function dotTipRows(row: DotCIRow, bestMean: number | null, format: (v: n
   return out;
 }
 
-export function DotCIChart({ rows, width, band = null, format = fmtValue, highlight = null, onOpen }: DotCIChartProps): ReactElement {
+export function DotCIChart({ rows, references = [], width, band = null, format = fmtValue, highlight = null, onOpen }: DotCIChartProps): ReactElement {
   const label = useChartLabel("Scores by config");
   const m = DOT_MARGIN;
-  const H = m.t + m.b + Math.max(1, rows.length) * DOT_ROW_H;
-  const vals: number[] = [];
+  const refs = references.filter((r) => isNum(r.value));
+  const H = m.t + m.b + Math.max(1, rows.length + refs.length) * DOT_ROW_H;
+  const vals: number[] = refs.map((r) => r.value);
   for (const r of rows) for (const v of [r.mean, r.lo, r.hi, ...(r.seeds ?? [])]) if (isNum(v)) vals.push(v);
   if (band) vals.push(band.lo, band.hi);
   // a named group, not role="img": its rows are focusable buttons
@@ -112,7 +117,7 @@ export function DotCIChart({ rows, width, band = null, format = fmtValue, highli
           </text>
         </g>
       ))}
-      {band ? <rect className="band" x={X(band.lo)} y={m.t} width={Math.max(0, X(band.hi) - X(band.lo))} height={H - m.t - m.b} /> : null}
+      {band ? <rect className="band" x={X(band.lo)} y={m.t} width={Math.max(0, X(band.hi) - X(band.lo))} height={rows.length * DOT_ROW_H} /> : null}
       {rows.map((r, i) => {
         const cy = m.t + i * DOT_ROW_H + DOT_ROW_H / 2;
         const interval = isNum(r.lo) && isNum(r.hi);
@@ -152,6 +157,17 @@ export function DotCIChart({ rows, width, band = null, format = fmtValue, highli
             </text>
           </g>
         );
+      })}
+      {refs.length ? <line x1={0} x2={width} y1={m.t + rows.length * DOT_ROW_H} y2={m.t + rows.length * DOT_ROW_H} stroke="var(--ink-3)" strokeDasharray="4 4" /> : null}
+      {refs.map((reference, i) => {
+        const cy = m.t + (rows.length + i) * DOT_ROW_H + DOT_ROW_H / 2;
+        const description = `Published value ${format(reference.value)}${isNum(reference.std) ? `; published std ${format(reference.std)}` : ""}${reference.source ? `; ${reference.source}` : ""}`;
+        return <g key={`${reference.name}:${i}`} data-reference={reference.name} tabIndex={0} aria-label={`${reference.name}: ${description}`}>
+          <title>{description}</title>
+          <text className="name" x={16} y={cy + 4}>{clip(reference.name, nameChars)}</text>
+          <PaperReferenceMark x={X(reference.value)} y={cy} />
+          <text className="val" x={width - 4} y={cy + 4} textAnchor="end">{format(reference.value)}</text>
+        </g>;
       })}
     </svg>
   );

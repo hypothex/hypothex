@@ -17,7 +17,8 @@ from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
@@ -29,26 +30,44 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy import func, or_, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import or_, select, text
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.requests import HTTPConnection
 from starlette.responses import Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from hypothex._version import __version__
+from hypothex.api.auth import (
+    LAUNCH,
+    PUBLIC,
+    READ,
+    UNAUTHORIZED,
+    AuthGuard,
+    annotate_scopes,
+    auth_on,
+    command_key,
+    identity,
+    principal_of,
+)
+from hypothex.api.routes_auth import register_auth_routes
+from hypothex.api.routes_storage import register_storage_routes
+from hypothex.api.routes_team import register_team_routes
 from hypothex.api.security import OriginGuard, TokenGuard, allowed_hosts
 from hypothex.api.tickets import TICKET_SECONDS, TicketStore
+from hypothex.auth.ownership import require_act, require_local_exec
+from hypothex.auth.store import HOST_PRINCIPAL, LOCAL_OWNER, AuthError, AuthStore, ScopeError
 from hypothex.core import control
 from hypothex.core import queries as q
 from hypothex.core import sweeps as sweeps_core
 from hypothex.core.config import load_project_config, parse_metric_version
 from hypothex.core.context import Context
 from hypothex.core.cost import cost_since, today_start
-from hypothex.core.errors import ConfigError, HypothexError, RunError, StoreError
+from hypothex.core.errors import ConfigError, HypothexError, RunError, RunNotFoundError, StoreError
 from hypothex.core.evaluation import EvalReport, reeval
 from hypothex.core.events import CommandInterruptedError
 from hypothex.core.execution import RunRequest
@@ -56,14 +75,16 @@ from hypothex.core.fsutil import atomic_write_text
 from hypothex.core.gitinfo import DIFF_LIMIT_BYTES, capture_diff, head_commit
 from hypothex.core.gpus import GpuInfo, gpu_status, query_gpus
 from hypothex.core.ids import utcnow
-from hypothex.core.index import RunRow
+from hypothex.core.index import IndexUnavailableError, RunRow, repair_pending
 from hypothex.core.jsonutil import to_jsonable
 from hypothex.core.layout import reserved_run_path
 from hypothex.core.naming import clean_run_name
+from hypothex.core.notebook import NotebookConflictError, NotebookTooLargeError
 from hypothex.core.overview import build_overview
 from hypothex.core.panels import query_panel
 from hypothex.core.records import Artifact, RunRecord, RunStatus
 from hypothex.core.scheduler import Scheduler, run_scheduler_loop
+from hypothex.core.settings import load_settings
 from hypothex.core.slurm import SlurmPoller, comment_accounting, require_flock
 from hypothex.core.sweep_issuance import (
     SweepIssuanceActiveError,
@@ -105,6 +126,7 @@ from hypothex.mcp.server import (
     validate_view,
     view_document,
 )
+from hypothex.notify.notifier import run_notifier_loop
 from hypothex.remote.client import (
     DIR_HEADER,
     SIZE_HEADER,
@@ -120,6 +142,8 @@ log = logging.getLogger(__name__)
 
 REPAIR_INTERVAL_SECONDS = 30.0
 SCHEDULER_INTERVAL_SECONDS = 5.0
+NOTIFY_INTERVAL_SECONDS = 5.0
+"""The hub's notifier ticks this often (Slack/email outbox, digests)."""
 ENV_KINDS = ("local", "ssh", "slurm")
 COST_WINDOW_DAYS = 7
 MIRROR_WAIT_SECONDS = 10.0
@@ -135,10 +159,16 @@ PULL_WORK_DIR = "pulls"
 """``<hub home>/pulls``: ``copy_from``'s staging, transaction records, and backups (Task 6)."""
 WS_POLL_SECONDS = 0.5
 WS_BATCH = 500
+WS_RECHECK_SECONDS = 30.0
+"""An open WebSocket re-checks its session this often (contract 1.10)."""
+ADMIN_EVENT_PREFIXES = ("auth.", "notify.")
+"""Event types only ``admin`` principals receive on the WebSocket."""
 UI_DIST = Path(__file__).resolve().parent.parent / "ui_dist"
 NO_UI_FALLBACK = frozenset({"api", "mcp", ".well-known", "assets"})
 #: Browser routes of the UI (``ui/src/router.tsx``) that load the app shell without a token.
-UI_ROUTE = re.compile(r"/(?:hosts|queue|r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?)/?")
+UI_ROUTE = re.compile(
+    r"/(?:hosts|queue|r/[^/]+|[xs]/[^/]+/[^/]+|t/[^/]+/[^/]+(?:/edit/[^/]+)?|n/[^/]+(?:/[^/]+)?|settings|storage|pair)/?"
+)
 FILE_MAX_BYTES = 200 * 1024 * 1024
 FILE_CHUNK_BYTES = 64 * 1024
 GPU_CACHE_SECONDS = 10.0
@@ -200,6 +230,30 @@ class ActionBody(BaseModel):
 
     command_id: str | None = None
     created_by: str = "api"
+    owner: str | None = None
+
+
+_Body = TypeVar("_Body", bound=ActionBody)
+
+
+def stamp(conn: HTTPConnection, body: _Body) -> _Body:
+    """
+    Return a copy of a body with ``created_by`` and ``owner`` decided by the server.
+
+    Parameters
+    ----------
+    conn : HTTPConnection
+        The request.
+    body : ActionBody
+        The parsed body.
+
+    Returns
+    -------
+    ActionBody
+        Same type; see ``hypothex.api.auth.identity``.
+    """
+    created_by, owner = identity(conn, created_by=body.created_by, owner=body.owner)
+    return body.model_copy(update={"created_by": created_by, "owner": owner})
 
 
 class RunFields(ActionBody):
@@ -452,6 +506,7 @@ async def _repair_loop(ctx: Context) -> None:
     while True:
         await asyncio.sleep(REPAIR_INTERVAL_SECONDS)
         try:
+            await asyncio.to_thread(repair_pending, ctx.index, ctx.store)
             await asyncio.to_thread(control.repair_runs, ctx)
         except Exception:  # noqa: BLE001 - keep the server alive
             log.exception("run repair failed")
@@ -489,6 +544,7 @@ def run_request(body: RunFields, repo: str) -> RunRequest:
         params=body.params,
         vars=body.vars,
         created_by=body.created_by,
+        owner=body.owner,
         gpus=body.gpus,
         queue=body.queue,
         slurm=body.slurm,
@@ -954,7 +1010,7 @@ def environment_runs(ctx: Context, environment_id: str) -> list[RunRecord]:
     """
     floor = (utcnow() - timedelta(days=COST_WINDOW_DAYS)).isoformat()
     active = [RunStatus.QUEUED.value, RunStatus.RUNNING.value]
-    ended = func.json_extract(RunRow.record_json, "$.ended_at")
+    ended = ctx.index.json_text(RunRow.record_json, "ended_at")
     stmt = select(RunRow.record_json).where(
         RunRow.environment_id == environment_id,
         or_(RunRow.status.in_(active), RunRow.created_at >= floor, ended >= floor),
@@ -1691,7 +1747,7 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
     gpu_cache = GpuCache()
     app.state.gpu_cache = gpu_cache  # the hub's own `local` row in GET /api/v1/hosts shares it
 
-    @app.get("/api/v1/runs/{run_id}/files/{path:path}")
+    @app.get("/api/v1/runs/{run_id}/files/{path:path}", dependencies=READ)
     def run_file(
         run_id: str,
         path: str,
@@ -1709,17 +1765,17 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
             return JSONResponse(listing, headers={DIR_HEADER: "1"})
         return file_response(fd, path, max_bytes=max_bytes, tail=tail)
 
-    @app.get("/api/v1/projects/{project}/entry")
+    @app.get("/api/v1/projects/{project}/entry", dependencies=READ)
     def project_entry(project: str) -> dict[str, Any]:
         # the hub copies a host-only project's config snapshot with this (Task 34)
         return ctx.store.load_project(project).model_dump(mode="json")
 
-    @app.get("/api/v1/gpus")
+    @app.get("/api/v1/gpus", dependencies=READ)
     def gpus() -> list[dict[str, Any]]:
         # held GPUs carry their run id; mirrored runs of other hosts never mark them
         return to_jsonable(gpu_status(ctx, gpu_cache.get()))
 
-    @app.get("/api/v1/queue")
+    @app.get("/api/v1/queue", dependencies=READ)
     def queue() -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         positions = Scheduler(ctx).positions()
@@ -1733,7 +1789,7 @@ def register_env_routes(app: FastAPI, ctx: Context) -> None:
             )
         return rows
 
-    @app.get("/api/v1/slurm")
+    @app.get("/api/v1/slurm", dependencies=READ)
     def slurm_capabilities() -> dict[str, Any]:
         # the hub shows this on the host row: without job comments in SLURM's accounting
         # an unknown submission can never be proven absent
@@ -1752,6 +1808,10 @@ def create_app(
     auth_token: str | None = None,
     hub: bool = True,
     hub_url: str | None = None,
+    auth: bool | None = None,
+    public_url: str | None = None,
+    notifier: bool | None = None,
+    token_is_host: bool = False,
     lifespan_context: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
 ) -> FastAPI:
     """
@@ -1796,6 +1856,17 @@ def create_app(
     hub_url : str, optional
         This server's own URL, given to the mounted MCP server so its remote tools
         call this hub (``hx serve`` passes it).
+    auth : bool, optional
+        Require scoped sessions; defaults to ``server.auth`` in config.yaml.
+    public_url : str, optional
+        Public origin for pairing, allowed hosts and secure cookies; defaults to
+        ``server.public_url`` in config.yaml.
+    token_is_host : bool
+        Explicit token provenance from the server launcher. Host credentials
+        preserve forwarded identities; generated local credentials do not.
+    notifier : bool, optional
+        Run Slack/email and digest delivery on a local hub. Defaults to enabled
+        when background repair and hub connections are enabled.
     lifespan_context : callable, optional
         Returns a context manager entered when the server starts (before the
         hub connects its hosts) and exited when it stops (after the hub
@@ -1819,6 +1890,13 @@ def create_app(
     ctx = Context.open(home)
     if kind is not None:
         ctx.descriptor.kind = kind
+    settings = load_settings(ctx.layout)
+    auth_enabled = settings.server.auth == "on" if auth is None else auth
+    public = public_url or settings.server.public_url
+    store = AuthStore(ctx.layout, session_days=settings.server.session_days)
+    run_notifier = (
+        notifier if notifier is not None else background_repair and hub
+    ) and ctx.descriptor.kind == "local"
     manager = HubManager(ctx)
     issuer = SweepIssuer(ctx)
     if ctx.descriptor.kind == "slurm":
@@ -1840,6 +1918,16 @@ def create_app(
                     args=(ctx, stop),
                     kwargs={"interval": SCHEDULER_INTERVAL_SECONDS},
                     name="hx-scheduler",
+                    daemon=True,
+                )
+            )
+        if run_notifier:
+            loops.append(
+                threading.Thread(
+                    target=run_notifier_loop,
+                    args=(ctx, stop),
+                    kwargs={"interval": NOTIFY_INTERVAL_SECONDS},
+                    name="hx-notifier",
                     daemon=True,
                 )
             )
@@ -1902,8 +1990,14 @@ def create_app(
     app.state.hub = manager
     app.state.sweep_issuer = issuer
     app.state.mcp = mcp_server
-    tickets = TicketStore()
+    app.state.auth = store
+    app.state.auth_on = auth_enabled
+    app.state.public_url = public
+    tickets = store.tickets if auth_enabled else TicketStore()
     app.state.ws_tickets = tickets
+    root_principal = (
+        HOST_PRINCIPAL if token_is_host or ctx.descriptor.kind in {"ssh", "slurm"} else LOCAL_OWNER
+    )
     ui = ui_dir or UI_DIST
     ui_installed = (ui / "index.html").is_file()
 
@@ -1922,6 +2016,9 @@ def create_app(
         return path == "/" or UI_ROUTE.fullmatch(path) is not None
 
     hosts = allowed_hosts(host)
+    public_host = urlsplit(public).hostname if public else None
+    if public_host and public_host not in hosts:
+        hosts.append(f"[{public_host}]" if ":" in public_host else public_host)
     # innermost: the guards answer first, and the hub's tunnels carry compressed JSON
     app.add_middleware(
         GZipMiddleware,
@@ -1929,19 +2026,64 @@ def create_app(
         compresslevel=GZIP_LEVEL,
         exclude_content_types=GZIP_SKIP_TYPES,
     )
-    app.add_middleware(TokenGuard, token=auth_token, tickets=tickets, public_static=public_static)
+    if auth_enabled:
+        app.add_middleware(
+            AuthGuard,
+            store=store,
+            host_token=auth_token if root_principal == HOST_PRINCIPAL else None,
+            public_static=public_static,
+        )
+    else:
+        app.add_middleware(
+            TokenGuard,
+            token=auth_token,
+            tickets=tickets,
+            public_static=public_static,
+            principal=root_principal,
+        )
     # Host and Origin reject before a one-use ticket can be consumed.
     app.add_middleware(OriginGuard, hosts=hosts)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
 
+    @app.exception_handler(OperationalError)
+    @app.exception_handler(InterfaceError)
+    async def index_error(_: Request, exc: OperationalError | InterfaceError) -> JSONResponse:
+        """Return a retryable index error without connection details.
+
+        Parameters
+        ----------
+        _ : Request
+            Failed request.
+        exc : OperationalError or InterfaceError
+            Database failure whose text is deliberately excluded.
+
+        Returns
+        -------
+        JSONResponse
+            A secret-free 503 response.
+        """
+        return JSONResponse(
+            {"error": "the index does not answer; retry", "type": "IndexUnavailableError"},
+            status_code=503,
+        )
+
     @app.exception_handler(HypothexError)
     async def hypothex_error(_: Request, exc: HypothexError) -> JSONResponse:
+        headers: dict[str, str] = {}
         if isinstance(exc, (SweepIssuanceActiveError, SweepLegacyResumeRequiredError)):
             status = 409
         elif isinstance(exc, StoreError):
             status = 404
-        elif isinstance(exc, HostUnavailableError):
+        elif isinstance(exc, (HostUnavailableError, IndexUnavailableError)):
             status = 503
+        elif isinstance(exc, AuthError):
+            status, headers = 401, UNAUTHORIZED
+        elif isinstance(exc, ScopeError):
+            status = 403
+        elif isinstance(exc, NotebookConflictError):
+            status = 409
+        elif isinstance(exc, NotebookTooLargeError):
+            status = 413
         else:
             status = 400
         if isinstance(exc, CommandInterruptedError):
@@ -1958,7 +2100,9 @@ def create_app(
             )
         if isinstance(exc, ViewValidationError):
             content["issues"] = to_jsonable(exc.issues)
-        return JSONResponse(status_code=status, content=content)
+        if isinstance(exc, NotebookConflictError):
+            content["current"] = to_jsonable(exc.current)
+        return JSONResponse(status_code=status, content=content, headers=headers)
 
     @app.exception_handler(EnvRequestError)
     async def host_error(_: Request, exc: EnvRequestError) -> JSONResponse:
@@ -1995,10 +2139,41 @@ def create_app(
             },
         )
 
-    def once(body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
-        return ctx.events.run_once(body.command_id, lambda: to_jsonable(fn()))
+    def check_legacy_command(conn: HTTPConnection, command_id: str | None) -> None:
+        """Preserve uncertain pre-upgrade outcomes for the original local owner.
+
+        Parameters
+        ----------
+        conn : HTTPConnection
+            Authenticated request. Scoped and host callers never read raw receipts.
+        command_id : str or None
+            Client ID before caller and route binding.
+
+        Notes
+        -----
+        A current bound receipt takes precedence. Any raw legacy receipt blocks
+        execution because its outcome cannot safely be bound to this caller and
+        route. Its payload is never returned or used to authorize an action.
+        """
+        if command_id is None or auth_on(conn) or principal_of(conn) != LOCAL_OWNER:
+            return
+        key = command_key(conn, command_id)
+        assert key is not None
+        if ctx.events.command_result(key) is not None:
+            return
+        if ctx.events.command_result(command_id) is not None:
+            raise CommandInterruptedError(
+                "command has a completed legacy receipt without caller/route binding; "
+                "inspect the existing outcome before deciding whether to issue a new command_id"
+            )
+
+    def once(conn: HTTPConnection, body: ActionBody, fn: Callable[[], Any]) -> dict[str, Any]:
+        # A receipt belongs to this caller and route, including retries with edited bodies.
+        check_legacy_command(conn, body.command_id)
+        return ctx.events.run_once(command_key(conn, body.command_id), lambda: to_jsonable(fn()))
 
     def forward(
+        conn: HTTPConnection,
         run_id: str,
         action: str,
         body: ActionBody,
@@ -2006,7 +2181,7 @@ def create_app(
         *,
         remote_only: bool = False,
     ) -> dict[str, Any]:
-        # A run mirrored from a host is acted on by that host; same body, same command_id.
+        # A run mirrored from a host is acted on there, with the caller-bound command key.
         # The run is looked up inside `once`, so a replayed command_id gets its receipt
         # first (as in phase 1); an error releases the claim, so a retry runs again.
         def act() -> Any:
@@ -2026,13 +2201,16 @@ def create_app(
                         "(`hx hosts add` / `hx hosts connect`)"
                     )
                 return local()
-            payload = body.model_dump(mode="json")
+            payload = {
+                **body.model_dump(mode="json"),
+                "command_id": command_key(conn, body.command_id),
+            }
             timeout = REEVAL_FORWARD_SECONDS if action == "reeval" else None
             return manager.client(host).post_json(
                 f"/api/v1/runs/{run_id}/{action}", payload, timeout=timeout
             )
 
-        return once(body, act)
+        return once(conn, body, act)
 
     def launcher_for(host: str | None, launched: list[str], *, project: str) -> Launcher | None:
         # None: the sweep engine launches here; a host name: forward each run to it.
@@ -2074,6 +2252,7 @@ def create_app(
                 queue=req.queue,
                 sweep_id=sweep_id,
                 created_by=req.created_by,
+                owner=req.owner,
                 command_id=run_command_id,  # the host's receipt makes a repeat the same run
             )
             record = RunRecord.model_validate(launch_on_host(ctx, manager, target, body))
@@ -2116,21 +2295,25 @@ def create_app(
         return summarize_sweep(ctx, spec.project, spec.id)
 
     # environment -----------------------------------------------------------------
-    @app.get("/.well-known/hypothex/environment")
-    @app.head("/.well-known/hypothex/environment", include_in_schema=False)
+    @app.get("/.well-known/hypothex/environment", dependencies=PUBLIC)
+    @app.head("/.well-known/hypothex/environment", include_in_schema=False, dependencies=PUBLIC)
     def environment(request: Request) -> dict[str, Any]:
         full = ctx.descriptor.model_dump(mode="json")
-        if auth_token and request.scope.get("hypothex.auth_token") != auth_token:
-            # open so start.sh can find its server; host facts only for the token holder
+        authenticated = (
+            request.scope.get("hx.principal") is not None
+            if auth_enabled
+            else auth_token is None or request.scope.get("hypothex.auth_token") == auth_token
+        )
+        if not authenticated:
             return {k: full[k] for k in PUBLIC_DESCRIPTOR_FIELDS}
         return full
 
-    @app.post("/api/v1/auth/ws-ticket", response_model=WebSocketTicket)
-    def ws_ticket() -> JSONResponse:
-        if auth_token is None:
+    @app.post("/api/v1/auth/ws-ticket", response_model=WebSocketTicket, dependencies=READ)
+    def ws_ticket(request: Request) -> JSONResponse:
+        if not auth_enabled and auth_token is None:
             payload: dict[str, Any] = {"ticket": None, "expires_in": 0}
         else:
-            ticket = tickets.issue()
+            ticket = store.issue_ticket(principal_of(request)) if auth_enabled else tickets.issue()
             if ticket is None:
                 return JSONResponse(
                     {"error": "too many outstanding WebSocket tickets", "type": "RateLimitError"},
@@ -2141,38 +2324,43 @@ def create_app(
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     # hosts (hub) ---------------------------------------------------------------------
-    @app.get("/api/v1/hosts")
+    @app.get("/api/v1/hosts", dependencies=READ)
     def hosts_list() -> list[dict[str, Any]]:
         return host_rows(ctx, manager, app.state.gpu_cache)
 
-    @app.post("/api/v1/hosts/reload")
+    @app.post("/api/v1/hosts/reload", dependencies=LAUNCH)
     async def hosts_reload(body: ActionBody | None = None) -> list[dict[str, Any]]:
         # `hx hosts add|map|rm` wrote environments.yaml: apply it to the running hub
         await manager.reload()
         # host_rows makes blocking calls to each host: keep them off the hub's event loop
         return await asyncio.to_thread(host_rows, ctx, manager, app.state.gpu_cache)
 
-    @app.post("/api/v1/hosts/{host}/connect")
+    @app.post("/api/v1/hosts/{host}/connect", dependencies=LAUNCH)
     async def host_connect(host: str, body: ActionBody | None = None) -> dict[str, Any]:
         return to_jsonable(await manager.connect(host))
 
-    @app.post("/api/v1/hosts/{host}/disconnect")
+    @app.post("/api/v1/hosts/{host}/disconnect", dependencies=LAUNCH)
     async def host_disconnect(host: str, body: ActionBody | None = None) -> dict[str, Any]:
         return to_jsonable(await manager.disconnect(host))
 
-    @app.post("/api/v1/hosts/{host}/runs")
-    def host_launch(host: str, body: HostLaunchBody) -> dict[str, Any]:
-        return once(body, lambda: launch_on_host(ctx, manager, host, body))
+    @app.post("/api/v1/hosts/{host}/runs", dependencies=LAUNCH)
+    def host_launch(host: str, body: HostLaunchBody, request: Request) -> dict[str, Any]:
+        if not is_remote(host):
+            require_local_exec(principal_of(request))  # `local`: the run executes here
+        body = stamp(request, body)
+        # the host keeps its receipt under the hub's key: one per hub caller
+        sent = body.model_copy(update={"command_id": command_key(request, body.command_id)})
+        return once(request, body, lambda: launch_on_host(ctx, manager, host, sent))
 
     # overview ----------------------------------------------------------------------
-    @app.get("/api/v1/overview")
+    @app.get("/api/v1/overview", dependencies=READ)
     def overview(since: datetime | None = None) -> dict[str, Any]:
         if since is not None and since.tzinfo is None:
             since = since.replace(tzinfo=UTC)
         return to_jsonable(build_overview(ctx, since))
 
     # projects & tasks ------------------------------------------------------------
-    @app.get("/api/v1/projects")
+    @app.get("/api/v1/projects", dependencies=READ)
     def projects() -> list[dict[str, Any]]:
         return [
             {
@@ -2184,15 +2372,15 @@ def create_app(
             for e in q.list_projects(ctx)
         ]
 
-    @app.get("/api/v1/tasks")
+    @app.get("/api/v1/tasks", dependencies=READ)
     def tasks(project: str | None = None) -> list[dict[str, Any]]:
         return to_jsonable(q.list_tasks(ctx, project))
 
-    @app.get("/api/v1/tasks/{project}/{task}")
+    @app.get("/api/v1/tasks/{project}/{task}", dependencies=READ)
     def task_detail(project: str, task: str) -> dict[str, Any]:
         return q.get_task(ctx, task, project)
 
-    @app.get("/api/v1/tasks/{project}/{task}/leaderboard")
+    @app.get("/api/v1/tasks/{project}/{task}/leaderboard", dependencies=READ)
     def leaderboard(
         project: str,
         task: str,
@@ -2207,12 +2395,14 @@ def create_app(
             versions[name] = version
         return to_jsonable(q.get_leaderboard(ctx, task, project, versions or None, primary=primary))
 
-    @app.get("/api/v1/tasks/{project}/{task}/runs")
+    @app.get("/api/v1/tasks/{project}/{task}/runs", dependencies=READ)
     def task_run_list(project: str, task: str, archived: bool = False) -> dict[str, Any]:
         return to_jsonable(task_runs(ctx, task, project, archived=archived))
 
-    @app.post("/api/v1/tasks/{project}/{task}/reeval")
-    def task_reeval(project: str, task: str, body: ReevalBody) -> dict[str, Any]:
+    @app.post("/api/v1/tasks/{project}/{task}/reeval", dependencies=LAUNCH)
+    def task_reeval(project: str, task: str, body: ReevalBody, request: Request) -> dict[str, Any]:
+        forwarded = body.model_copy(update={"command_id": command_key(request, body.command_id)})
+
         # spec 8A.3: a mirrored run is re-scored on its host (the mirror replaces the hub's
         # scores.jsonl with the host's whole file); only the hub's own runs, and runs no
         # host ever mirrored here (demo, imported), are scored here
@@ -2246,7 +2436,7 @@ def create_app(
                     report.skipped[record.run_id] = down[host]
                     continue
                 try:
-                    part = EvalReport.model_validate(_reeval_on(host, record.run_id, body))
+                    part = EvalReport.model_validate(_reeval_on(host, record.run_id, forwarded))
                 except (HostUnavailableError, EnvUnreachableError) as exc:
                     down[host] = report.skipped[record.run_id] = f"host {host}: {exc}"[:500]
                     continue
@@ -2258,7 +2448,7 @@ def create_app(
                 report.warnings += [w for w in part.warnings if w not in report.warnings]
             return report
 
-        return once(body, act)
+        return once(request, body, act)
 
     def _mirror_host(environment_id: str) -> str | None:
         # None: re-score here; else the host the run was mirrored from (configured or not)
@@ -2277,53 +2467,60 @@ def create_app(
             f"/api/v1/runs/{run_id}/reeval", payload, timeout=REEVAL_FORWARD_SECONDS
         )
 
-    @app.get("/api/v1/tasks/{project}/{task}/kind")
+    @app.get("/api/v1/tasks/{project}/{task}/kind", dependencies=READ)
     def task_kind(project: str, task: str) -> dict[str, Any]:
         entry, name = q.resolve_task(ctx, task, project)
         kind = entry.config.tasks[name].kind
         return {"kind": kind, "run_view": to_jsonable(_run_view(kind))}
 
     # views -------------------------------------------------------------------------
-    @app.get("/api/v1/tasks/{project}/{task}/views")
+    @app.get("/api/v1/tasks/{project}/{task}/views", dependencies=READ)
     def views(project: str, task: str) -> list[dict[str, Any]]:
         return to_jsonable(list_task_views(ctx, task, project))
 
-    @app.post("/api/v1/tasks/{project}/{task}/views/validate")
+    @app.post("/api/v1/tasks/{project}/{task}/views/validate", dependencies=READ)
     def views_validate(project: str, task: str, body: ViewTextBody) -> dict[str, Any]:
         return validate_view(ctx, task, body.text, project)
 
-    @app.post("/api/v1/tasks/{project}/{task}/views/query")
+    @app.post("/api/v1/tasks/{project}/{task}/views/query", dependencies=READ)
     def views_query(project: str, task: str, body: ViewQueryBody) -> dict[str, Any]:
         return query_task_view(
             ctx, task, project=project, name=body.name, view=body.view, panel=body.panel
         )
 
-    @app.get("/api/v1/tasks/{project}/{task}/views/{name}")
+    @app.get("/api/v1/tasks/{project}/{task}/views/{name}", dependencies=READ)
     def view_get(project: str, task: str, name: str) -> dict[str, Any]:
         return view_document(ctx, task, name, project)
 
-    @app.put("/api/v1/tasks/{project}/{task}/views/{name}")
-    def view_put(project: str, task: str, name: str, body: ViewPutBody) -> dict[str, Any]:
-        return once(body, lambda: put_view(ctx, task, name, body.text, project))
+    @app.put("/api/v1/tasks/{project}/{task}/views/{name}", dependencies=LAUNCH)
+    def view_put(
+        project: str, task: str, name: str, body: ViewPutBody, request: Request
+    ) -> dict[str, Any]:
+        return once(request, body, lambda: put_view(ctx, task, name, body.text, project))
 
-    @app.delete("/api/v1/tasks/{project}/{task}/views/{name}")
+    @app.delete("/api/v1/tasks/{project}/{task}/views/{name}", dependencies=LAUNCH)
     def view_delete(project: str, task: str, name: str) -> dict[str, Any]:
         return remove_view(ctx, task, name, project)
 
     # runs ----------------------------------------------------------------------------
-    @app.get("/api/v1/runs")
+    @app.get("/api/v1/runs", dependencies=READ)
     def runs(
+        request: Request,
         project: str | None = None,
         task: str | None = None,
         status: RunStatus | None = None,
         tag: str | None = None,
         environment_id: str | None = None,
+        owner: str | None = None,
         archived: bool = False,
         limit: Annotated[int, Query(ge=1)] = 200,
         before_created_at: datetime | None = None,
         before_run_id: str | None = None,
         search: Annotated[str | None, Query(alias="q", max_length=200)] = None,
     ) -> list[dict[str, Any]]:
+        who = principal_of(request).user if owner == "me" and auth_on(request) else owner
+        if owner == "me" and not auth_on(request):
+            who = None
         # no cap below `limit`. Keyset paging: the next page starts after the last row of
         # this one (`before_created_at`, `before_run_id`), so a page costs `limit` rows
         if (before_created_at is None) != (before_run_id is None):
@@ -2339,6 +2536,7 @@ def create_app(
             status=status,
             tag=tag,
             environment_id=environment_id,
+            owner=who,
             include_archived=archived,
             limit=limit,
             before=before,
@@ -2354,15 +2552,29 @@ def create_app(
             row["host_state"] = states[env]
         return rows
 
-    @app.post("/api/v1/runs")
-    def launch(body: LaunchBody) -> dict[str, Any]:
-        return once(body, lambda: launch_here(ctx, body, body.repo))
+    @app.post("/api/v1/runs", dependencies=LAUNCH)
+    def launch(body: LaunchBody, request: Request) -> dict[str, Any]:
+        require_local_exec(principal_of(request))  # the command runs as this server's user
+        body = stamp(request, body)
+        return once(request, body, lambda: launch_here(ctx, body, body.repo))
 
-    @app.post("/api/v1/runs/stop_queued")
-    def runs_stop_queued(body: StopQueuedBody) -> dict[str, Any]:
-        return once(body, lambda: stop_queued_runs(ctx, body.run_ids))
+    @app.post("/api/v1/runs/stop_queued", dependencies=LAUNCH)
+    def runs_stop_queued(body: StopQueuedBody, request: Request) -> dict[str, Any]:
+        def act() -> CancelResult:
+            principal = principal_of(request)
+            # Check every existing member before cancelling any; missing IDs retain the
+            # baseline batch helper's failure accounting instead of stopping the loop.
+            for run_id in dict.fromkeys(body.run_ids):
+                try:
+                    record = ctx.find_record(run_id)
+                except RunNotFoundError:
+                    continue
+                require_act(principal, record.owner, "cancel_queued")
+            return stop_queued_runs(ctx, body.run_ids)
 
-    @app.get("/api/v1/runs/{run_id}")
+        return once(request, body, act)
+
+    @app.get("/api/v1/runs/{run_id}", dependencies=READ)
     def run_detail(run_id: str) -> dict[str, Any]:
         detail = q.show_run(ctx, run_id)
         out = to_jsonable(detail)
@@ -2373,7 +2585,7 @@ def create_app(
         )
         return out
 
-    @app.get("/api/v1/runs/{run_id}/metrics")
+    @app.get("/api/v1/runs/{run_id}/metrics", dependencies=READ)
     def run_metrics(
         run_id: str,
         names: Annotated[list[str] | None, Query()] = None,
@@ -2382,13 +2594,13 @@ def create_app(
         # a chart asks for the names it shows, at about its width in points (PERF-F9)
         return to_jsonable(q.metric_history(ctx, run_id, names=names, max_points=max_points))
 
-    @app.get("/api/v1/runs/{run_id}/traces")
+    @app.get("/api/v1/runs/{run_id}/traces", dependencies=READ)
     def run_traces(run_id: str) -> list[dict[str, Any]]:
         record = ctx.find_record(run_id)
         return ctx.store.list_traces(record.project, record.run_id)
 
     # `:path` keeps example ids such as "HumanEval/0" in one parameter.
-    @app.get("/api/v1/runs/{run_id}/traces/{example_id:path}")
+    @app.get("/api/v1/runs/{run_id}/traces/{example_id:path}", dependencies=READ)
     def run_trace(run_id: str, example_id: str) -> dict[str, Any]:
         record = ctx.find_record(run_id)
         known = {t["example_id"] for t in ctx.store.list_traces(record.project, record.run_id)}
@@ -2401,11 +2613,11 @@ def create_app(
         )
         return to_jsonable(query_panel(ctx, record.project, record.task or "", panel))
 
-    @app.get("/api/v1/runs/{run_id}/logs")
+    @app.get("/api/v1/runs/{run_id}/logs", dependencies=READ)
     def run_logs(run_id: str, stream: str = "stdout", offset: int | None = None) -> dict[str, Any]:
         return to_jsonable(q.read_log(ctx, run_id, stream, offset))
 
-    @app.get("/api/v1/runs/{run_id}/predictions")
+    @app.get("/api/v1/runs/{run_id}/predictions", dependencies=READ)
     def run_predictions(
         run_id: str,
         offset: int = 0,
@@ -2426,31 +2638,39 @@ def create_app(
             )
         )
 
-    @app.post("/api/v1/runs/{run_id}/rerun")
-    def run_rerun(run_id: str, body: ActionBody) -> dict[str, Any]:
-        return forward(
-            run_id,
-            "rerun",
-            body,
-            lambda: control.rerun(ctx, run_id, created_by=body.created_by),
-            remote_only=True,
-        )
+    @app.post("/api/v1/runs/{run_id}/rerun", dependencies=LAUNCH)
+    def run_rerun(run_id: str, body: ActionBody, request: Request) -> dict[str, Any]:
+        principal = principal_of(request)
+        body = stamp(request, body)
 
-    @app.post("/api/v1/runs/{run_id}/reinfer")
-    def run_reinfer(run_id: str, body: ReinferBody) -> dict[str, Any]:
-        return forward(
-            run_id,
-            "reinfer",
-            body,
-            lambda: control.reinfer(
-                ctx, run_id, checkpoint=body.checkpoint, vars=body.vars, created_by=body.created_by
-            ),
-            remote_only=True,
-        )
+        def here() -> RunRecord:  # a local run's child executes here; a host's is forwarded
+            require_local_exec(principal)
+            return control.rerun(ctx, run_id, created_by=body.created_by, owner=body.owner)
 
-    @app.post("/api/v1/runs/{run_id}/reeval")
-    def run_reeval(run_id: str, body: ReevalBody) -> dict[str, Any]:
+        return forward(request, run_id, "rerun", body, here, remote_only=True)
+
+    @app.post("/api/v1/runs/{run_id}/reinfer", dependencies=LAUNCH)
+    def run_reinfer(run_id: str, body: ReinferBody, request: Request) -> dict[str, Any]:
+        principal = principal_of(request)
+        body = stamp(request, body)
+
+        def here() -> RunRecord:
+            require_local_exec(principal)
+            return control.reinfer(
+                ctx,
+                run_id,
+                checkpoint=body.checkpoint,
+                vars=body.vars,
+                created_by=body.created_by,
+                owner=body.owner,
+            )
+
+        return forward(request, run_id, "reinfer", body, here, remote_only=True)
+
+    @app.post("/api/v1/runs/{run_id}/reeval", dependencies=LAUNCH)
+    def run_reeval(run_id: str, body: ReevalBody, request: Request) -> dict[str, Any]:
         return forward(
+            request,
             run_id,
             "reeval",
             body,
@@ -2458,43 +2678,69 @@ def create_app(
             remote_only=True,
         )
 
-    @app.post("/api/v1/runs/{run_id}/stop")
-    def run_stop(run_id: str, body: StopBody) -> dict[str, Any]:
+    @app.post("/api/v1/runs/{run_id}/stop", dependencies=LAUNCH)
+    def run_stop(run_id: str, body: StopBody, request: Request) -> dict[str, Any]:
+        check_legacy_command(request, body.command_id)
+        require_act(principal_of(request), ctx.find_record(run_id).owner, "stop")
+
         def act() -> RunRecord:
             if body.only_queued:
                 return stop_if_queued(ctx, run_id)
             return control.stop_run(ctx, run_id)
 
-        return forward(run_id, "stop", body, act, remote_only=True)
+        return forward(request, run_id, "stop", body, act, remote_only=True)
 
-    @app.post("/api/v1/runs/{run_id}/tags")
-    def run_tags(run_id: str, body: TagBody) -> dict[str, Any]:
-        return forward(run_id, "tags", body, lambda: q.tag_run(ctx, run_id, body.add, body.remove))
+    @app.post("/api/v1/runs/{run_id}/tags", dependencies=LAUNCH)
+    def run_tags(run_id: str, body: TagBody, request: Request) -> dict[str, Any]:
+        def act() -> RunRecord:
+            return q.tag_run(ctx, run_id, body.add, body.remove)
 
-    @app.post("/api/v1/runs/{run_id}/name")
-    def run_name(run_id: str, body: NameBody) -> dict[str, Any]:
-        return forward(run_id, "name", body, lambda: q.rename_run(ctx, run_id, body.name))
+        return forward(request, run_id, "tags", body, act)
 
-    @app.post("/api/v1/runs/{run_id}/star")
-    def run_star(run_id: str, body: FlagBody) -> dict[str, Any]:
-        return forward(run_id, "star", body, lambda: q.star_run(ctx, run_id, body.on))
+    @app.post("/api/v1/runs/{run_id}/name", dependencies=LAUNCH)
+    def run_name(run_id: str, body: NameBody, request: Request) -> dict[str, Any]:
+        return forward(request, run_id, "name", body, lambda: q.rename_run(ctx, run_id, body.name))
 
-    @app.post("/api/v1/runs/{run_id}/archive")
-    def run_archive(run_id: str, body: FlagBody) -> dict[str, Any]:
-        return forward(run_id, "archive", body, lambda: q.archive_run(ctx, run_id, body.on))
+    @app.post("/api/v1/runs/{run_id}/star", dependencies=LAUNCH)
+    def run_star(run_id: str, body: FlagBody, request: Request) -> dict[str, Any]:
+        return forward(request, run_id, "star", body, lambda: q.star_run(ctx, run_id, body.on))
 
-    @app.post("/api/v1/runs/{run_id}/notes")
-    def run_note(run_id: str, body: NoteBody) -> dict[str, Any]:
+    @app.post("/api/v1/runs/{run_id}/archive", dependencies=LAUNCH)
+    def run_archive(run_id: str, body: FlagBody, request: Request) -> dict[str, Any]:
+        check_legacy_command(request, body.command_id)
+        require_act(principal_of(request), ctx.find_record(run_id).owner, "archive")
+        return forward(
+            request, run_id, "archive", body, lambda: q.archive_run(ctx, run_id, body.on)
+        )
+
+    @app.post("/api/v1/runs/{run_id}/notes", dependencies=LAUNCH)
+    def run_note(run_id: str, body: NoteBody, request: Request) -> dict[str, Any]:
+        author, _ = identity(request, created_by=body.author, owner=None)
+        body = body.model_copy(update={"author": author})
+
         def act() -> dict[str, bool]:
             q.add_note(ctx, run_id, body.text, body.author)
             return {"ok": True}
 
-        return forward(run_id, "notes", body, act)
+        return forward(request, run_id, "notes", body, act)
 
     # sweeps --------------------------------------------------------------------------
-    @app.post("/api/v1/sweeps")
-    def sweep_create(body: SweepBody) -> dict[str, Any]:
+    @app.post("/api/v1/sweeps", dependencies=LAUNCH)
+    def sweep_create(body: SweepBody, request: Request) -> dict[str, Any]:
+        if not is_remote(body.host):
+            require_local_exec(principal_of(request))
+        body = stamp(request, body)
+
         def prepare() -> dict[str, Any]:
+            # Older local-only APIs used raw command IDs. Refuse a legacy claim
+            # explicitly, without ever replaying an unbound receipt for a caller.
+            if not auth_on(request) and principal_of(request) == LOCAL_OWNER and body.command_id:
+                legacy = sweeps_core._claimed_sweep(ctx.layout, body.project, body.command_id)
+                if legacy:
+                    raise SweepLegacyResumeRequiredError(
+                        f"sweep {legacy} has a legacy claim; use hx sweep extend {legacy} --seeds "
+                        "to resume explicitly (including a zero-run sweep)"
+                    )
             require_agent_hypothesis(body.created_by, body.hypothesis)
             remote = is_remote(body.host)
             if remote:
@@ -2515,6 +2761,7 @@ def create_app(
                 commit,
                 diff,
             )
+            spec = spec.model_copy(update={"owner": body.owner})
             repo = sweeps_core._resolve_repo(ctx, body.project, body.task, None, remote=remote)
             return {
                 "spec": spec.model_dump(mode="json"),
@@ -2524,61 +2771,75 @@ def create_app(
                 "queue": body.queue,
             }
 
-        return issuer.accept(body.command_id, prepare)
+        check_legacy_command(request, body.command_id)
+        return issuer.accept(command_key(request, body.command_id), prepare)
 
-    @app.get("/api/v1/sweeps/{sweep_id}")
+    @app.get("/api/v1/sweeps/{sweep_id}", dependencies=READ)
     def sweep_get_by_id(sweep_id: str) -> dict[str, Any]:
         # a client on another machine knows the id, not the hub's store
         spec = find_sweep(ctx, sweep_id)
         return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
 
-    @app.get("/api/v1/sweeps/{project}/{sweep_id}")
+    @app.get("/api/v1/sweeps/{project}/{sweep_id}", dependencies=READ)
     def sweep_get(project: str, sweep_id: str) -> dict[str, Any]:
         spec = find_sweep(ctx, sweep_id, project)
         return to_jsonable(summarize_sweep(ctx, spec.project, spec.id))
 
-    @app.get("/api/v1/projects/{project}/sweeps")
+    @app.get("/api/v1/projects/{project}/sweeps", dependencies=READ)
     def project_sweeps(project: str) -> list[dict[str, Any]]:
         return to_jsonable(list_sweeps(ctx, project))
 
-    @app.post("/api/v1/sweeps/{project}/{sweep_id}/cancel_queued")
-    def sweep_cancel(project: str, sweep_id: str, body: ActionBody | None = None) -> dict[str, Any]:
+    @app.post("/api/v1/sweeps/{project}/{sweep_id}/cancel_queued", dependencies=LAUNCH)
+    def sweep_cancel(
+        project: str, sweep_id: str, request: Request, body: ActionBody | None = None
+    ) -> dict[str, Any]:
         action = body or ActionBody()
+        principal = principal_of(request)
 
         def act() -> SweepSummary:
             spec = find_sweep(ctx, sweep_id, project)
+            require_act(principal, spec.owner, "cancel_queued")
             issuer.request_cancel(spec.project, spec.id)
-            stop = stopper_for(spec.host, action.command_id)
+            stop = stopper_for(spec.host, command_key(request, action.command_id))
             return cancel_queued(ctx, spec.project, spec.id, stop_batch=stop)
 
-        return once(action, act)
+        return once(request, action, act)
 
-    @app.post("/api/v1/sweeps/{project}/{sweep_id}/extend")
-    def sweep_extend(project: str, sweep_id: str, body: SeedsBody) -> dict[str, Any]:
-        if ctx.events.sweep_operation(project, sweep_id) is not None:
-            return issuer.extend(body.command_id, project, sweep_id, body.seeds)
+    @app.post("/api/v1/sweeps/{project}/{sweep_id}/extend", dependencies=LAUNCH)
+    def sweep_extend(
+        project: str, sweep_id: str, body: SeedsBody, request: Request
+    ) -> dict[str, Any]:
+        check_legacy_command(request, body.command_id)
+        principal = principal_of(request)
+        spec = find_sweep(ctx, sweep_id, project)
+        if not is_remote(spec.host):
+            require_local_exec(principal)
+        if ctx.events.sweep_operation(spec.project, spec.id) is not None:
+            return issuer.extend(
+                command_key(request, body.command_id), spec.project, spec.id, body.seeds
+            )
 
         def act() -> SweepSummary:
-            spec = find_sweep(ctx, sweep_id, project)
             launched: list[str] = []
             launch = launcher_for(spec.host, launched, project=spec.project)
             more = extend_sweep(ctx, spec.project, spec.id, body.seeds, launch=launch)
             return settled(more.spec, launched)
 
-        return once(body, act)
+        return once(request, body, act)
 
-    @app.post("/api/v1/runs/{run_id}/pull")
-    def run_pull(run_id: str, body: PullBody) -> dict[str, Any]:
-        return once(
-            body, lambda: {"local_path": str(pull_artifact(ctx, manager, run_id, body.artifact))}
-        )
+    @app.post("/api/v1/runs/{run_id}/pull", dependencies=LAUNCH)
+    def run_pull(run_id: str, body: PullBody, request: Request) -> dict[str, Any]:
+        def act() -> dict[str, str]:
+            return {"local_path": str(pull_artifact(ctx, manager, run_id, body.artifact))}
+
+        return once(request, body, act)
 
     # compare & datasets ----------------------------------------------------------------
-    @app.get("/api/v1/compare")
+    @app.get("/api/v1/compare", dependencies=READ)
     def compare(ids: str) -> dict[str, Any]:
         return to_jsonable(q.compare_runs(ctx, [i for i in ids.split(",") if i]))
 
-    @app.get("/api/v1/compare/examples")
+    @app.get("/api/v1/compare/examples", dependencies=READ)
     def compare_examples(
         a: str,
         b: str,
@@ -2590,16 +2851,27 @@ def create_app(
             q.compare_examples(ctx, a, b, metric, field, require_bound=require_bound)
         )
 
-    @app.get("/api/v1/datasets/check")
+    @app.get("/api/v1/datasets/check", dependencies=READ)
     def datasets_check(project: str | None = None) -> list[dict[str, Any]]:
         return to_jsonable(q.check_datasets(ctx, project))
 
     # live events -------------------------------------------------------------------------
-    @app.websocket("/api/v1/ws")
+    @app.websocket("/api/v1/ws", dependencies=READ)
     async def events_ws(ws: WebSocket) -> None:
         await ws.accept(subprotocol=ws.scope.get("hypothex.ws_protocol"))
+        principal = principal_of(ws)
+        checked_at = asyncio.get_running_loop().time()
         try:
-            first = await ws.receive()
+            while True:
+                try:
+                    first = await asyncio.wait_for(ws.receive(), timeout=WS_RECHECK_SECONDS)
+                    break
+                except TimeoutError:
+                    if principal.session_id and not await asyncio.to_thread(
+                        store.session_active, principal.session_id
+                    ):
+                        await ws.close(code=4401)
+                        return
             if first["type"] == "websocket.disconnect":
                 return
             try:
@@ -2627,9 +2899,20 @@ def create_app(
                 last = sub.after_sequence
             ready = False
             while True:
+                now = asyncio.get_running_loop().time()
+                if principal.session_id and now - checked_at >= WS_RECHECK_SECONDS:
+                    checked_at = now
+                    if not await asyncio.to_thread(store.session_active, principal.session_id):
+                        await ws.close(code=4401)
+                        return
                 batch = await asyncio.to_thread(ctx.events.since, last, WS_BATCH)
                 for event in batch:
-                    await ws.send_json({"type": "event", "event": event.model_dump(mode="json")})
+                    if principal.scope == "admin" or not event.type.startswith(
+                        ADMIN_EVENT_PREFIXES
+                    ):
+                        await ws.send_json(
+                            {"type": "event", "event": event.model_dump(mode="json")}
+                        )
                     last = event.sequence
                 if len(batch) < WS_BATCH:
                     if not ready:
@@ -2640,7 +2923,11 @@ def create_app(
         except WebSocketDisconnect:
             return
 
+    register_auth_routes(app, ctx, store)
+    register_team_routes(app, ctx)
+    register_storage_routes(app, ctx, manager)
     register_env_routes(app, ctx)
+    annotate_scopes(app)
 
     class BareMcp:
         """Exact ASGI dispatch; a function endpoint would be wrapped as a Request handler."""

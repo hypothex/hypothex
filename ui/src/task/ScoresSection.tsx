@@ -5,7 +5,8 @@
  * a row without an interval gets `DotCIChart`'s own "no interval" tooltip note.
  */
 import type { ReactElement } from "react";
-import type { TaskRuns } from "../api/models";
+import { PaperBaselines, baselineReferences } from "../pages/components/BaselineRows";
+import type { BaselineRow, TaskRuns } from "../api/models";
 import { type DotCIRow, DotCIChart } from "../charts/DotCIChart";
 import { Fit } from "../charts/Fit";
 import { type ScatterPoint, ScatterPareto } from "../charts/ScatterPareto";
@@ -60,13 +61,14 @@ export function paretoPoints(items: readonly Identity[], colorOf: (id: string) =
 
 export interface ScoresSectionProps {
   data: TaskRuns;
+  baselines?:BaselineRow[];
   items: readonly Identity[];
   colorOf: (id: string) => string;
   highlight: string | null;
   query: string;
 }
 
-export function ScoresSection({ data, items, colorOf, highlight, query }: ScoresSectionProps): ReactElement | null {
+export function ScoresSection({ data, items, colorOf, highlight, query, baselines=[] }: ScoresSectionProps): ReactElement | null {
   const title = keyLabel(data.primary);
   const paretoTitle = `${title} vs GPU-hours`;
   const points = data.kind === "training" ? paretoPoints(items, colorOf) : [];
@@ -76,10 +78,10 @@ export function ScoresSection({ data, items, colorOf, highlight, query }: Scores
   const rows = scoreRows(items, colorOf);
   const what = items.some((i) => i.kind === "run") ? "runs" : "configs";
   return (
-    <PanelSection title="Scores" count={(showScore ? 1 : 0) + (showPareto ? 1 : 0)} storageKey={`${data.project}/${data.task}`} grid="fill">
+    <><PanelSection title="Scores" count={(showScore ? 1 : 0) + (showPareto ? 1 : 0)} storageKey={`${data.project}/${data.task}`} grid="fill">
       {showScore ? (
         <Panel title={title} unit={data.higher_is_better ? "higher is better" : "lower is better"} aside={`${rows.length} ${what}`}>
-          <Fit>{(width) => <DotCIChart width={width} rows={rows} band={bestBand(data)} highlight={highlight} />}</Fit>
+          <Fit>{(width) => <DotCIChart width={width} rows={rows} references={baselineReferences(baselines,data.primary)} band={bestBand(data)} highlight={highlight} />}</Fit>
         </Panel>
       ) : null}
       {showPareto ? (
@@ -89,6 +91,6 @@ export function ScoresSection({ data, items, colorOf, highlight, query }: Scores
           </Fit>
         </Panel>
       ) : null}
-    </PanelSection>
+    </PanelSection><PaperBaselines baselines={baselines} primary={data.primary} versions={data.metric_versions} best={data.groups.find(g=>g.is_best)?.primary?.mean}/></>
   );
 }

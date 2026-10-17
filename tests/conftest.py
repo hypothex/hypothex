@@ -14,6 +14,7 @@ from tests.fakes import (
     refuse_host_tools,
     refuse_remote,
 )
+from tests.fakes.network import SECRET_VARS, guard_network, refuse_tailscale, scrub_pg_environment
 
 
 @pytest.fixture
@@ -52,6 +53,11 @@ def pytest_configure(config: pytest.Config) -> None:
     session.delenv("HYPOTHEX_FAKE_GPUS", raising=False)
     refuse_remote(base / "no-ssh", session)
     refuse_host_tools(base, session)
+    scrub_pg_environment(session)
+    guard_network(session)
+    for name in SECRET_VARS:
+        session.delenv(name, raising=False)
+    refuse_tailscale(base / "no-tailscale", session)
 
 
 @pytest.fixture(scope="session")
@@ -63,6 +69,10 @@ def _isolation_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def isolate_remote(_isolation_bin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Keep every test away from real hosts, a real hub, real GPUs, and real SLURM.
+
+    Sockets, name lookups, and ``psycopg`` reach loopback only, all ``PG*``
+    defaults and the secret variables (``SECRET_VARS``) are unset, and
+    ``HYPOTHEX_TAILSCALE`` points at a refusing stub.
 
     The session baseline (``pytest_configure``) already holds these values;
     this fixture sets them again per test (undone afterwards), so one test's
@@ -79,6 +89,11 @@ def isolate_remote(_isolation_bin: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("HYPOTHEX_FAKE_GPUS", raising=False)
     refuse_remote(_isolation_bin / "no-ssh", monkeypatch)
     refuse_host_tools(_isolation_bin, monkeypatch)
+    scrub_pg_environment(monkeypatch)
+    guard_network(monkeypatch)
+    for name in SECRET_VARS:
+        monkeypatch.delenv(name, raising=False)
+    refuse_tailscale(_isolation_bin / "no-tailscale", monkeypatch)
 
 
 @pytest.fixture

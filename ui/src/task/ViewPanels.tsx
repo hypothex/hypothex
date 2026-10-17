@@ -6,7 +6,8 @@
  * tab's panel search) keeps the panels whose title matches.
  */
 import type { ReactElement } from "react";
-import type { PanelResult, PanelSpec, TaskKind } from "../api/models";
+import { withBaselines } from "../pages/components/BaselineRows";
+import type { BaselineRow, PanelResult, PanelSpec, TaskKind } from "../api/models";
 import { NavigateContext, useNavigateHref } from "../pages/components/links";
 import { PanelGrid } from "../pages/components/PanelGrid";
 import { matchesSearch } from "./stepMetrics";
@@ -31,6 +32,7 @@ export function panelTitle(result: PanelResult, spec: PanelSpec | undefined): st
 
 export interface ViewPanelsProps {
   results: readonly PanelResult[];
+  baselines?:BaselineRow[];
   specs?: readonly PanelSpec[];
   kind?: TaskKind;
   onSelectRun?: (runId: string) => void;
@@ -38,7 +40,7 @@ export interface ViewPanelsProps {
   query?: string;
 }
 
-export function ViewPanels({ results, specs, kind, onSelectRun, query = "" }: ViewPanelsProps): ReactElement {
+export function ViewPanels({ results, specs, kind, onSelectRun, query = "",baselines=[] }: ViewPanelsProps): ReactElement {
   const navigate = useNavigateHref();
   const select = (href: string): void => {
     const id = kind !== undefined && onSelectRun && INLINE_RUN_KINDS.has(kind) ? inlineRunId(href) : null;
@@ -49,7 +51,7 @@ export function ViewPanels({ results, specs, kind, onSelectRun, query = "" }: Vi
   const keptSpecs = specs && kept.every((k) => k.spec !== undefined) ? kept.map((k) => k.spec as PanelSpec) : undefined;
   return (
     <NavigateContext.Provider value={select}>
-      <PanelGrid results={kept.map((k) => k.result)} specs={keptSpecs} />
+      <PanelGrid results={kept.map((k) => withBaselines(k.result,baselines))} specs={keptSpecs} />
     </NavigateContext.Provider>
   );
 }

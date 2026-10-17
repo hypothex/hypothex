@@ -60,6 +60,9 @@ class TimelineItem(BaseModel):
     is_best: bool
     label: str
 
+    owner: str | None = None
+    """The run's owner (``RunRecord.owner``); None with auth off or before phase 3."""
+
 
 class IdeaRow(BaseModel):
     """One seed group with at least one unarchived run in the window."""
@@ -78,6 +81,9 @@ class IdeaRow(BaseModel):
     unit: str = ""
     """Display unit of the task's primary metric (``Leaderboard.unit``): ``ms``, ``$``."""
 
+    owner: str | None = None
+    """The run's owner (``RunRecord.owner``); None with auth off or before phase 3."""
+
 
 class FailureRow(BaseModel):
     """A failed or lost run, with where to read its error."""
@@ -88,6 +94,9 @@ class FailureRow(BaseModel):
     created_at: datetime
     stderr_path: str
     retried_ok: bool
+
+    owner: str | None = None
+    """The run's owner (``RunRecord.owner``); None with auth off or before phase 3."""
 
 
 class ProjectRow(BaseModel):
@@ -133,6 +142,9 @@ class RecentRun(BaseModel):
     """The run's primary score at the task's current metric version."""
     delta_best: float | None
     """``primary`` minus the best config mean of the task."""
+
+    owner: str | None = None
+    """The run's owner (``RunRecord.owner``); None with auth off or before phase 3."""
 
 
 class RunProgress(BaseModel):
@@ -234,7 +246,7 @@ def _recent_runs(ctx: Context, start: datetime, today: datetime) -> list[RunReco
     floor = (start - _SQL_SLACK).astimezone(UTC).isoformat()
     ended_floor = (today - _SQL_SLACK).astimezone(UTC).isoformat()
     active = [s.value for s in ACTIVE_STATUSES]
-    ended = func.json_extract(RunRow.record_json, "$.ended_at")
+    ended = ctx.index.json_text(RunRow.record_json, "ended_at")
     stmt = (
         select(RunRow.record_json)
         .where(or_(RunRow.created_at >= floor, RunRow.status.in_(active), ended >= ended_floor))
@@ -599,6 +611,7 @@ def _recent_rows(
                 project=run.project,
                 task=run.task,
                 name=names[run.run_id],
+                owner=run.owner,
                 status=run.status,
                 end_reason=run.end_reason,
                 exit_code=run.exit_code,
@@ -724,6 +737,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
                 group_id=group_id_for(run),
                 is_best=best is not None and run.run_id in best.run_ids,
                 label=label(run),
+                owner=run.owner,
             )
         )
 
@@ -743,6 +757,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
                 group_id=gid,
                 label=row.label if row is not None else _short_label(members[-1]),
                 created_by=members[0].created_by,
+                owner=members[0].owner,
                 created_at=members[0].created_at,
                 statuses=[m.status for m in members],
                 primary=row.primary if row is not None else None,
@@ -759,6 +774,7 @@ def build_overview(ctx: Context, since: datetime | None = None) -> OverviewSumma
         FailureRow(
             run_id=run.run_id,
             label=label(run),
+            owner=run.owner,
             exit_code=run.exit_code,
             created_at=run.created_at,
             stderr_path=str(ctx.run_dir(run) / "logs" / "stderr.log"),

@@ -41,6 +41,7 @@ from hypothex.remote.config import EnvironmentsFile, HostSpec, load_hosts, save_
 from hypothex.remote.hub import HostState, Hub
 from hypothex.remote.ssh import SshTarget
 from tests.factories import init_git_repo, write_toy_project
+from tests.fakes.network import pg_child_environment
 
 T = TypeVar("T")
 
@@ -157,7 +158,7 @@ def run_cmd(
         capture_output=True,
         text=True,
         timeout=timeout,
-        env={**os.environ, **(env or {})},
+        env=pg_child_environment({**os.environ, **(env or {})}),
     )
     if check and proc.returncode != 0:
         raise AssertionError(

@@ -26,6 +26,15 @@ from hypothex.mcp.server import (
 from tests.factories import PREDS_075, seed_finished_run
 
 EXPECTED_TOOLS = {
+    "export_table",
+    "export_compare",
+    "get_baselines",
+    "get_notebook",
+    "add_notebook_entry",
+    "get_digest",
+    "storage_report",
+    "plan_storage_clean",
+    "whoami",
     "list_projects",
     "list_tasks",
     "get_task",

@@ -18,3 +18,14 @@ Metric functions
 
 .. automodule:: hypothex.metrics
    :members:
+
+API cost shortcut
+-----------------
+
+``run.log_cost`` records the same usage row as ``run.log_usage``::
+
+   import hypothex as hx
+   hx.current().log_cost(0.0131, tokens_in=4410, tokens_out=512, example_id="ex-1")
+
+Costs and token counts must be finite and nonnegative. The cost is included in
+``cost.api_usd`` when the run ends. Outside a Hypothex run the call is a no-op.

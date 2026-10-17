@@ -471,3 +471,120 @@ fresh demo hub in a ``/tmp`` home, served without a token:
    uv run hx demo --with-hosts
    uv run hx serve --port 7777 --no-auth       # leave running
    cd ui && HX_URL=http://127.0.0.1:7777 bun scripts/screenshots.ts
+
+Team access and device pairing
+------------------------------
+
+**Pair** (``/pair``) is a public page without the application shell. Open the
+single-use link produced by ``hx pair`` or **Settings**. Its fragment is removed
+before redemption; enter a device name and choose Pair. Browser sessions use an
+HttpOnly cookie, and the response contains no bearer token. After pairing, Home
+loads the authenticated shell. Invalid, expired or already-used links require a
+new offer. The original root Token field remains available for local owner access.
+See :doc:`authentication` and :doc:`team` for session lifetimes and scopes.
+
+The top bar identifies the current user and scope. Read scope can inspect runs,
+exports and notebooks. Launch scope enables shared-host launches, notes, names,
+tags and notebook edits; stopping, cancelling and archiving also require the run
+owner or admin. Local execution and host administration require admin. Missing
+legacy ownership is not guessed. Pending or failed identity reads disable actions.
+On Home, **Mine** filters only Running now; Tasks, Recent runs and global totals
+remain global. Runs and recent failures display their recorded owner.
+
+**Settings** (``/settings``) lists sessions and marks this browser's current
+session. Revoke ends that session; a revoked current session clears cached data and
+returns to the Token gate. Admins also see Users, Add device and Notifications.
+Pairing links remain only in the open offer panel, expire visibly, and are cleared
+when you leave Settings. Notifications show delivery status and allow a test through the
+configured Slack or email channel. See :doc:`notifications` and :doc:`configuration`.
+A ``403`` displays the permission failure without locking the browser; ``401`` or
+WebSocket ``4401`` stops retries and clears private queries and editor state.
+Older servers lacking ``/auth/me`` retain their original screens after protected
+transport validation, with new team features unavailable.
+
+Notebook
+--------
+
+**Notebook** (``/n/<project>`` or ``/n/<project>/<day>``) opens the UTC day with a
+calendar and previous/next navigation. Markdown entries preserve their author and
+run links such as ``[[run:abc123]]``.
+Missing targets remain readable. Add entry appends to the day; Edit day replaces
+it using the loaded base hash. A concurrent change shows Mine and Theirs with
+Use theirs, Keep mine or Copy mine, so an edit cannot silently overwrite another
+writer. The latest editor attribution comes from live notebook events and clears
+when the session changes. A 413 response retains the draft and reports the 1 MiB
+limit. Weekly summary blocks preserve recorded totals and incomplete-cost
+annotations. Read scope can browse but cannot submit edits. See
+:doc:`notebook` for the equivalent CLI, SDK and MCP operations.
+
+Exports and paper baselines
+----------------------------
+
+Task **Export** opens a preview with LaTeX, Markdown and CSV formats, noise and
+digit options, and Copy and Download. A saved view uses its currently selected
+primary metric. Export remains unavailable until that ranking has loaded; changes
+invalidate the previous preview. Downloaded text is exactly the API response.
+Copied or downloaded results never continue after a credential replacement. See
+:doc:`export` for formatting and :doc:`views` for saved views.
+
+Paper baselines are separate reference rows beneath measured Scores and compatible
+leaderboards. Only the exact recorded metric key and version match. Authored
+intervals are shown as supplied, with a paper reference and a non-ranking marker;
+they do not count as runs, seeds, uncertainty estimates or winners. Missing values
+stay blank. Sweep cost is unknown when the server does not declare complete
+pricing; the tooltip retains the known recorded subtotal.
+
+Storage and cleanup
+-------------------
+
+**Storage** (``/storage``) is admin-only and shows By project, By host and Largest.
+Dry run creates a concrete plan with candidates, bytes and reasons. Apply opens a
+confirmation requiring the exact integer ``total_bytes`` from that plan; rounded
+display units are never accepted as the confirmation. The result reports actual
+freed bytes, deleted items and skipped reasons, including a partially successful
+application. Refresh or plan again after changed files invalidate a candidate.
+See :doc:`storage` for policies and the immutable plan contract.
+
+Deleted artifact markers retain historical metrics and display the cleanup time,
+bytes and actor. A marker matches only the same filesystem environment and exact
+path (or descendants), so a hub copy does not mark a host source deleted. Matching
+file and checkpoint rows are struck through and no longer offer an existing-file
+copy action. Re-infer is disabled when its selected checkpoint is known deleted.
+Legacy markers without an environment stay unknown.
+
+Team browser acceptance
+-----------------------
+
+The ``team-light`` and ``team-dark`` Playwright projects use separate disposable
+homes seeded with ``hx demo --with-team``. Their servers disable SSH and SCP, use
+fake notification receivers, and sanitize pairing fragments before logging. The
+flows exercise cookie pairing, scope-specific Settings, notebook conflicts,
+exported bytes, exact cleanup confirmation and deletion, and revoked sessions.
+No screenshot is taken while a live pairing secret is visible. Existing UI v5
+browser projects still cover the task/run shell, selection and scrolling behavior.
+See :doc:`testing`, :doc:`sdk` and :doc:`mcp` for the shared acceptance contract.
+
+.. code-block:: bash
+
+   cd ui
+   bunx playwright test --project=team-light --project=team-dark
+
+Installed-package acceptance is described in :doc:`package-testing` and
+:doc:`testing`. Its fresh wheel runs
+outside the checkout and verifies restart plus upgrades from authentic schema 3
+and schema 4 homes. SQLite rebuilds indexes to schema 5; PostgreSQL uses Alembic
+migrations instead (see :doc:`configuration`). Host URL and Tailscale setup remain
+in :doc:`remote`; :doc:`sdk` and :doc:`mcp` describe scoped clients and complete
+versus unknown cost reporting.
+
+The team acceptance screens below use disposable data. Both colour themes are
+retained in ``docs/_static/ui``.
+
+.. image:: _static/ui/settings-light.png
+   :alt: Settings with sessions, users, device scopes and notification status
+
+.. image:: _static/ui/notebook-light.png
+   :alt: Notebook after retaining a draft through a concurrent edit conflict
+
+.. image:: _static/ui/storage-light.png
+   :alt: Storage after confirmed cleanup with exact freed bytes and deleted files

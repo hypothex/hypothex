@@ -1,3 +1,5 @@
+import { useMe } from "../api/queries";
+import { hasScope } from "../api/scopes";
 /**
  * Launch dialog (spec 8A.5, 8A.8; mockups docs/mockups/phase2/shot-launch*.png).
  *
@@ -176,6 +178,8 @@ function HostPicker({
   project,
   now,
   lockedTo,
+  canLaunch,
+  canLocal,
   onPick,
 }: {
   hosts: LaunchHost[];
@@ -184,6 +188,8 @@ function HostPicker({
   now: number;
   /** after a partial launch the rest of the seeds go to the same host: the others are disabled */
   lockedTo: string | null;
+  canLaunch: boolean;
+  canLocal: boolean;
   onPick: (host: LaunchHost) => void;
 }) {
   return (
@@ -191,10 +197,11 @@ function HostPicker({
       {hosts.map((h) => {
         const av = availability(h, project, now);
         const locked = lockedTo !== null && h.name !== lockedTo;
-        const ok = av.ok && !locked;
+        const permitted=canLaunch && (h.kind!=="hub" || canLocal);
+        const ok = av.ok && !locked && permitted;
         const on = h.name === selected;
         const cls = [on ? "on" : "", ok ? "" : "off"].filter(Boolean).join(" ");
-        const title = locked ? `seeds started on ${lockedTo}: the rest go there` : av.ok ? hostTitle(h) : av.reason;
+        const title = !permitted ? (h.kind==="hub" ? "Local execution requires admin scope" : "Launch scope required") : locked ? `seeds started on ${lockedTo}: the rest go there` : av.ok ? hostTitle(h) : av.reason;
         return (
           <label key={h.name} className={cls || undefined} title={title}>
             <input
@@ -420,6 +427,9 @@ export function LaunchDialog({
   onClose,
   onLaunched,
 }: LaunchDialogProps) {
+  const me=useMe();
+  const canLaunch=hasScope(me.data,"launch");
+  const canLocal=hasScope(me.data,"admin");
   const client = useQueryClient();
   const hosts = useLaunchHosts();
   const [draft, setDraft] = useState<LaunchDraft>(() => ({ ...DEFAULT_DRAFT, ...initial }));
@@ -434,12 +444,13 @@ export function LaunchDialog({
   const launchedGeneration = useRef<number | null>(null);
 
   useEffect(() => {
-    if (picked.current || hosts.data === undefined) return;
+    if (picked.current || hosts.data === undefined || !me.data || me.isError) return;
     picked.current = true;
-    const name = initialHost(hosts.data, project, draft.host, templateEnvironment);
+    const available=hosts.data.filter(h=>canLaunch && (h.kind!=="hub" || canLocal));
+    const name = initialHost(available, project, draft.host, templateEnvironment);
     const chosen = hosts.data.find((h) => h.name === name);
     setDraft((d) => ({ ...d, host: name, gpus: chosen ? initialGpus(chosen, initial?.gpus) : d.gpus }));
-  }, [hosts.data, project, draft.host, templateEnvironment, initial?.gpus]);
+  }, [hosts.data, project, draft.host, templateEnvironment, initial?.gpus,me.data,me.isError,canLaunch,canLocal]);
 
   useEffect(() => {
     if (copy === "idle") return;
@@ -465,6 +476,8 @@ export function LaunchDialog({
     launched.host !== null && draft.host !== launched.host
       ? [...check.blockers, `seeds started on ${launched.host}: the rest go there`]
       : check.blockers;
+  if (!hasScope(me.data,"launch")) blockers.push("Launch scope required");
+  else if (host?.kind === "hub" && !hasScope(me.data,"admin")) blockers.push("Runs on this machine need admin; launch on a host");
   const blocked = blockers.length > 0;
   const spec: LaunchSpec | null =
     host === null || check.argv.length === 0
@@ -510,11 +523,12 @@ export function LaunchDialog({
   };
 
   const copyCli = async (): Promise<void> => {
+    const generation=auth.snapshot().generation;
     try {
       await navigator.clipboard.writeText(cli);
-      setCopy("copied");
+      if(auth.current(generation)) setCopy("copied");
     } catch {
-      setCopy("failed");
+      if(auth.current(generation)) setCopy("failed");
     }
   };
 
@@ -592,6 +606,8 @@ export function LaunchDialog({
                   project={project}
                   now={now}
                   lockedTo={launched.host}
+                  canLaunch={canLaunch}
+                  canLocal={canLocal}
                   onPick={(h) => update({ host: h.name, gpus: h.slurm?.defaults?.gpus ?? gpusForHost(draft.gpus, h, host) })}
                 />
               ) : hosts.error ? null : <Loading />}

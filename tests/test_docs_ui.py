@@ -171,3 +171,37 @@ def test_readme_shows_the_task_screenshot() -> None:
     readme = (ROOT / "README.md").read_text()
     assert "](docs/_static/ui/task-light.png)" in readme
     assert "Overview with" not in readme
+
+
+def test_ui_page_covers_team_screens_and_exact_state_contracts() -> None:
+    """Keep the new screens documented alongside the retained UI v5 behavior."""
+    page = _page()
+    for text in (
+        "**Pair**",
+        "/pair",
+        "**Settings**",
+        "/settings",
+        "**Notebook**",
+        "/n/<project>/<day>",
+        "**Storage**",
+        "/storage",
+        "**Mine**",
+        "HttpOnly",
+        "4401",
+        "Keep mine",
+        "total_bytes",
+        "Paper baselines",
+        "metric key and version",
+        "same filesystem environment",
+        "known deleted",
+        "team-light",
+        "team-dark",
+        "hx demo --with-team",
+        ":doc:`team`",
+        ":doc:`notebook`",
+        ":doc:`storage`",
+        ":doc:`export`",
+        ":doc:`notifications`",
+        ":doc:`testing`",
+    ):
+        assert text in page, text

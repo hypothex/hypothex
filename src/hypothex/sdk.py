@@ -420,6 +420,36 @@ class Run:
             raise ValueError(f"invalid usage: {_why(exc)}") from None
         append_jsonl(self.run_dir / "usage.jsonl", row.model_dump(mode="json"))
 
+    def log_cost(
+        self,
+        usd: float,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        example_id: str | None = None,
+    ) -> None:
+        """
+        Record API spend (spec 9's ``run.log_cost``); same row as ``log_usage``.
+
+        Parameters
+        ----------
+        usd : float
+            Cost in US dollars.
+        tokens_in, tokens_out : int
+            Tokens, split like ``usage.jsonl``.
+        example_id : str, optional
+            The example the call was made for.
+
+        Raises
+        ------
+        ValueError
+            If a value is negative or not finite; nothing is written then.
+
+        Examples
+        --------
+        >>> hx.current().log_cost(0.0131, tokens_in=4410, tokens_out=512)  # doctest: +SKIP
+        """
+        self.log_usage(tokens_in=tokens_in, tokens_out=tokens_out, usd=usd, example_id=example_id)
+
     def log_samples(self, name: str, values: Iterable[float]) -> None:
         """
         Append raw sample values (e.g. latencies) to ``samples/<name>.jsonl``.
@@ -503,6 +533,15 @@ class NoopRun:
         tokens_out: int = 0,
         usd: float = 0.0,
         seconds: float = 0.0,
+        example_id: str | None = None,
+    ) -> None:
+        """Do nothing."""
+
+    def log_cost(
+        self,
+        usd: float,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
         example_id: str | None = None,
     ) -> None:
         """Do nothing."""

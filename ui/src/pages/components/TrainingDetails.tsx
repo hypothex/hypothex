@@ -1,8 +1,9 @@
+import { cleanedArtifact, cleanedLabel } from "./cleaned";
 /** Training records: checkpoint validation and run-level evaluations stay separate. */
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, request, ROUTES } from "../../api/client";
-import type { Artifact, PanelSpec, RunRecord, ScoreRecord, ViewQueryBody } from "../../api/models";
+import type { CleanedArtifact, Artifact, PanelSpec, RunRecord, ScoreRecord, ViewQueryBody } from "../../api/models";
 import { queryKeys, useTask } from "../../api/queries";
 import { AppLink, hrefs, isPlainClick } from "./links";
 import { latestScores } from "./ScoresList";
@@ -13,18 +14,18 @@ const finite = (value: unknown): value is number => typeof value === "number" &&
 const numberText = (value: unknown): string => finite(value) ? String(value) : DASH;
 
 /** Render exactly the metrics recorded on checkpoints, including zero and absent fields. */
-export function CheckpointTable({ artifacts }: { artifacts: readonly Artifact[] }) {
+export function CheckpointTable({ artifacts,cleaned=[],environmentId }: { artifacts: readonly Artifact[];cleaned?:readonly CleanedArtifact[];environmentId?:string|null }) {
   const checkpoints = artifacts.filter(artifact => artifact.kind === "checkpoint");
   const names = [...new Set(checkpoints.flatMap(artifact => Object.keys(artifact.metrics)))].sort();
   if (!checkpoints.length) return <p className="small">No checkpoints recorded.</p>;
   return <div style={{ overflowX: "auto" }}>
     <table className="sw-runs" aria-label="Checkpoint metrics">
       <thead><tr><th scope="col">Step</th><th scope="col">Path</th>{names.map(name => <th scope="col" key={name}>{name}</th>)}</tr></thead>
-      <tbody>{checkpoints.map((artifact, index) => <tr key={`${artifact.host}:${artifact.path}:${index}`}>
+      <tbody>{checkpoints.map((artifact, index) => { const marker=cleanedArtifact(artifact.path,environmentId,cleaned); return <tr key={`${artifact.host}:${artifact.path}:${index}`}>
         <td>{numberText(artifact.step)}</td>
-        <td style={{ overflowWrap: "anywhere" }}>{artifact.host ? `${artifact.host}:` : ""}{artifact.path}</td>
+        <td style={{ overflowWrap: "anywhere" }}>{marker ? <><s>{artifact.host ? `${artifact.host}:` : ""}{artifact.path}</s> <span title={`Deleted by ${marker.actor}`}>{cleanedLabel(marker)}</span></> : <>{artifact.host ? `${artifact.host}:` : ""}{artifact.path}</>}</td>
         {names.map(name => <td key={name}>{numberText(artifact.metrics[name])}</td>)}
-      </tr>)}</tbody>
+      </tr>;})}</tbody>
     </table>
     <p className="small">Recorded checkpoint metrics; val/* are validation measurements. Run-level evaluated scores are shown separately.</p>
   </div>;
@@ -70,19 +71,21 @@ function RunLink({ run, onSelectRun }: { run: RunRecord; onSelectRun?: TrainingP
   }}>{run.run_id}</AppLink>;
 }
 
-/** Task checkpoints, paged by run; no history or individual run-detail requests. */
+/** Task checkpoints, paged by run; cleanup details reuse at most twenty cached run queries. */
 export function TrainingCheckpoints(props: TrainingProps) {
   return <TrainingCheckpointPage key={JSON.stringify([props.project, props.task])} {...props} />;
 }
 
 function TrainingCheckpointPage({ project, task, onSelectRun }: TrainingProps) {
   const state = useTrainingPage(project, task);
+  const details=useQueries({queries:state.runs.map(run=>({queryKey:queryKeys.run(run.run_id),queryFn:({signal}:{signal:AbortSignal})=>api.run(run.run_id,signal)}))});
   if (state.query.isPending) return <p role="status" className="small">Loading checkpoints…</p>;
   if (state.query.isError) return <div><p role="alert">Could not load checkpoints: {state.query.error.message}</p><Pager state={state} /></div>;
   return <div>
-    {!state.runs.length ? <p className="small">No training runs recorded.</p> : state.runs.map(run => <section key={run.run_id} style={{ marginBottom: 16 }}>
+    {!state.runs.length ? <p className="small">No training runs recorded.</p> : state.runs.map((run,index) => <section key={run.run_id} style={{ marginBottom: 16 }}>
       <h3><RunLink run={run} onSelectRun={onSelectRun} /></h3>
-      <CheckpointTable artifacts={run.artifacts} />
+      <CheckpointTable artifacts={run.artifacts} environmentId={run.environment_id} cleaned={details[index]?.data?.cleaned} />
+      {details[index]?.isError && <p className="muted">Cleanup state unavailable</p>}
     </section>)}
     <Pager state={state} />
   </div>;

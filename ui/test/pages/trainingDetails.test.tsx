@@ -70,8 +70,9 @@ test("checkpoint pages have bounded listing and preserve each run's attribution"
   expect(screen.queryByRole("link", { name: "r20" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Next page" }));
   await waitFor(() => expect(screen.getByRole("link", { name: "r20" })).toBeTruthy());
-  expect(calls).toHaveLength(2);
-  expect(calls.every(c => c.url.startsWith("/api/v1/runs?"))).toBe(true);
+  expect(calls.filter(c=>c.url.startsWith("/api/v1/runs?"))).toHaveLength(2);
+  expect(calls.filter(c=>/^\/api\/v1\/runs\/[^/?]+$/.test(c.url))).toHaveLength(21);
+  expect(calls.every(c => c.url.startsWith("/api/v1/runs?") || /^\/api\/v1\/runs\/[^/?]+$/.test(c.url))).toBe(true);
 });
 
 test("training run page requests details only for twenty displayed records", async () => {

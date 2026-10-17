@@ -11,7 +11,12 @@ header; OpenAPI, API data, files and MCP remain protected. Only GET/HEAD of the
 exact public identity descriptor and installed UI resources/navigation are public.
 Run ``hx token`` locally with the server's Hypothex home to retrieve its credential.
 
-``POST /api/v1/auth/ws-ticket`` requires that bearer and returns
+With ``hx serve --auth``, session bearers or paired browser cookies authenticate
+requests, and each operation additionally enforces its scope and ownership rules.
+Pair redemption is also public in this mode and requires its one-use offer secret.
+See :doc:`team` and :doc:`authentication` for users, sessions and revocation.
+
+``POST /api/v1/auth/ws-ticket`` requires authentication and returns
 ``{"ticket": "...", "expires_in": 30}`` with ``Cache-Control: no-store``. Tickets
 are single-use and server-local; at most 256 unexpired tickets are outstanding,
 after which issuance returns ``429``. Explicit no-auth servers return
@@ -21,7 +26,8 @@ Conventions
 -----------
 
 - Errors are JSON: ``{"error": "...", "type": "..."}``. ``400`` for a bad request,
-  ``401`` for a missing or wrong bearer token, ``404`` for an unknown run, project, or
+  ``401`` for missing or invalid authentication, ``403`` for insufficient scope or
+  ownership, ``404`` for an unknown run, project, or
   file, ``409`` for an interrupted command, ``413`` for a file larger than
   ``max_bytes``, ``415`` for a ``POST`` without JSON, ``422`` for a body that does
   not match the schema, and ``503`` when a host is not connected (or no configured
@@ -32,9 +38,19 @@ Conventions
   files (``application/octet-stream``) are sent as they are.
 - A ``POST`` needs a JSON body (``Content-Type: application/json``, ``{}`` when
   there is nothing to send) or an ``X-Hypothex-Client`` header; else ``415``.
-- Every ``POST`` body takes an optional ``command_id``. A repeated ``command_id``
-  returns the first result and does the work only once. ``created_by`` names the
-  author (``agent:<name>`` for agents; such launches need a ``hypothesis``).
+- Run/control mutations accept an optional ``command_id``; their repeated IDs
+  return the original receipt. In team mode these receipts are bound to the
+  caller and route. Pairing offers and other endpoints without command receipts
+  must not be automatically retried. ``created_by`` labels the author
+  (``agent:<name>`` for agents; such launches need a ``hypothesis``); authenticated
+  ownership is derived separately from the caller.
+
+When upgrading an existing token-mode hub, an old command receipt may have no
+caller or route binding. Retrying that ID returns ``409`` rather than replaying
+an unbound result or repeating its side effects. Inspect the existing outcome
+before deciding whether to issue a new ``command_id``; do not blindly retry with
+a fresh ID. A receipt already bound to the current caller and route still takes
+precedence and returns its original result.
 
 .. code-block:: bash
 

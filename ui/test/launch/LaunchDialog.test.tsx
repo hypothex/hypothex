@@ -938,3 +938,7 @@ test("an oversized template GPU request is retained but cannot launch even with 
   expect(launchButton(1).disabled).toBe(true);
   expect(launchButton(1).getAttribute("title")).toContain("99 GPUs requested; gpu1 has");
 });
+
+test("launch-only principal cannot choose the hub but can choose a mapped shared host",async()=>{
+ const calls=mockApi({...HOSTS,'GET /api/v1/auth/me':{auth:'on',user:'alice',scope:'launch',scopes:['read','launch'],session_id:'s1',client:'browser',public_url:null}});renderDialog();await ready();expect(radio('local').disabled).toBe(true);expect(radio('gpu1').disabled).toBe(false);expect(rowOf('local').title).toContain('admin');fireEvent.click(radio('local'));expect(calls.some(c=>c.method==='POST')).toBe(false);
+});

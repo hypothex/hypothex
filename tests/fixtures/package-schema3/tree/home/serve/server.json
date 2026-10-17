@@ -1,0 +1,12 @@
+{
+  "pid": 1,
+  "port": 0,
+  "managed": false,
+  "hx_version": "0.1.0.dev0",
+  "protocol_version": 1,
+  "token": "schema3-synthetic-root",
+  "environment_id": "0d23685058ae4793bbfab827b4959dbc",
+  "hostname": "Shreyass-MacBook-Pro.local",
+  "home": "__HX_FIXTURE_ROOT__/home",
+  "pid_create_time": 0.0
+}

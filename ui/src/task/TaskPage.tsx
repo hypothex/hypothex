@@ -1,3 +1,6 @@
+import { ExportMenu } from "../pages/components/ExportMenu";
+import { hasScope, phase3Available } from "../api/scopes";
+import { useMe } from "../api/queries";
 /**
  * Task page (spec 4.2): header (name, kind tag, one facts line, Re-evaluate all) and tabs
  * Charts · Runs · Sweeps · Examples · saved views · + View, chosen by `?tab=`. The run
@@ -36,6 +39,7 @@ export function TaskPage(props: TaskPageProps): ReactElement {
 }
 
 function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
+  const me=useMe();
   const [params, setSearch] = useSearchState();
   const tab = parseTab(params);
   const runs = useTaskRuns(project, task);
@@ -152,10 +156,11 @@ function TaskPageScope({ project, task }: TaskPageProps): ReactElement {
             </span>
           ) : null}
           <span className="sp" />
+          {tab.kind !== "view" && phase3Available(me.data) && <ExportMenu project={project} task={task} primary={board.data?.primary} ready={!!board.data && !board.isPending && !board.isError && !board.isFetching && !board.isPlaceholderData}/> }
           <button
             type="button"
             className="btn sm"
-            disabled={reeval.pending}
+            disabled={!hasScope(me.data,"launch") || reeval.pending}
             title="Re-score every run's saved predictions with the current metric versions"
             onClick={() => {
               setReevalReport(null);

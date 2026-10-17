@@ -6,7 +6,9 @@
  */
 import { type ReactElement, useState } from "react";
 import type { Leaderboard, ViewInfo } from "../api/models";
-import { useView, useViewQuery } from "../api/queries";
+import { ExportMenu } from "../pages/components/ExportMenu";
+import { phase3Available } from "../api/scopes";
+import { useMe, useLeaderboard, useView, useViewQuery } from "../api/queries";
 import { AppLink, hrefs } from "../pages/components/links";
 import { ErrorBox, Loading } from "../pages/components/QueryState";
 import { SelectedRun } from "../pages/components/SelectedRun";
@@ -22,6 +24,7 @@ export interface ViewTabProps {
 }
 
 export function ViewTab({ project, task, name, board, info }: ViewTabProps): ReactElement {
+  const me=useMe();
   const [primary, setPrimary] = useState<string | undefined>(undefined);
   const [seeds, setSeeds] = useState<boolean | undefined>(undefined);
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
@@ -30,6 +33,8 @@ export function ViewTab({ project, task, name, board, info }: ViewTabProps): Rea
   const customized = primary !== undefined || seeds !== undefined;
   const effective = view ? applyOverrides(view, { primary, seeds }) : undefined;
   const panels = useViewQuery(project, task, customized ? (effective ? { view: effective } : null) : { name });
+  const selectedBoard=useLeaderboard(project,task,[],{primary:primary ?? board?.primary,enabled:!!board?.primary});
+  const exportReady=!!selectedBoard.data && !selectedBoard.isPending && !selectedBoard.isFetching && !selectedBoard.isError && !selectedBoard.isPlaceholderData && !panels.isFetching && !panels.isError && !panels.isPlaceholderData && !!panels.data && !detail.isPending && !detail.isError;
   const origin = (info ?? detail.data?.info)?.origin;
   const error = detail.error ?? panels.error;
   const ready = panels.data !== undefined && !panels.isPlaceholderData && !detail.isPending;
@@ -69,6 +74,7 @@ export function ViewTab({ project, task, name, board, info }: ViewTabProps): Rea
           </label>
         ) : null}
         <span className="sp" />
+        {phase3Available(me.data) && <ExportMenu project={project} task={task} primary={selectedBoard.data?.primary} ready={exportReady}/>}
         {view ? <span className="muted">{`${count} panel${count === 1 ? "" : "s"}`}</span> : null}
         {origin !== undefined && origin !== "preset" ? (
           <AppLink className="btn sm" href={hrefs.edit(project, task, name)}>
@@ -81,6 +87,7 @@ export function ViewTab({ project, task, name, board, info }: ViewTabProps): Rea
       ) : ready && panels.data ? (
         <ViewPanels
           results={panels.data.panels}
+          baselines={selectedBoard.data?.baselines ?? []}
           specs={customized ? effective?.panels : view?.panels}
           kind={board?.kind}
           onSelectRun={setSelectedRun}

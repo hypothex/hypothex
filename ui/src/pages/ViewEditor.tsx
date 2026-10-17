@@ -1,3 +1,6 @@
+import { auth } from "../api/auth";
+import { hasScope } from "../api/scopes";
+import { useMe } from "../api/queries";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import "../editor/editor.css";
@@ -124,18 +127,24 @@ export function ViewEditor({ project, task, view, onSaved, renderPanel = registr
   const invalid = !checking && validation.data?.ok === false;
   const dirty = text !== baseline;
 
+  const me=useMe();
+  const writable=hasScope(me.data,"launch");
   const save = useSaveView(project, task);
   const onSave = () => {
+    if(!writable) return;
+    const credential=auth.capture();
     const sent = text;
     save.mutate(
-      { name, text: sent },
+      { name, text: sent, credential },
       {
         onSuccess: () => {
+          if(!auth.current(credential.generation)) return;
           setBaseline(sent);
           setSaveError(null);
           onSaved?.(name);
         },
         onError: (err) => {
+          if(!auth.current(credential.generation)) return;
           setSaveError(err.message);
           if (err instanceof ApiError && err.issues.length > 0) setIssues(err.issues);
         },
@@ -244,7 +253,7 @@ export function ViewEditor({ project, task, view, onSaved, renderPanel = registr
           <button
             type="button"
             className="btn primary"
-            disabled={!canSave}
+            disabled={!writable || !canSave}
             title={saveTitle}
             onClick={onSave}
           >

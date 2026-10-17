@@ -1,11 +1,15 @@
+import { cleanedArtifact } from "../pages/components/cleaned";
 /** The run's files as list rows (spec 4.3 Files): name, path relative to the run folder, size, copy text. */
-import type { RunDetail, RunRecord } from "../api/models";
+import type { CleanedArtifact, RunDetail, RunRecord } from "../api/models";
 import { displayPath, relativeTo, splitHostPath } from "../pages/components/format";
 import { hrefs } from "../pages/components/links";
 
 export type FileIcon = "folder" | "doc" | "box";
 
 export interface FileRow {
+  rawPath?:string;
+  environmentId?:string|null;
+  cleaned?:CleanedArtifact;
   icon: FileIcon;
   name: string;
   /** Relative to the run folder when inside it, else `host:path`. */
@@ -61,7 +65,7 @@ function fileRows(detail: RunDetail, all: boolean): FileRow[] {
   for (const art of record.artifacts) {
     if (!all && art.kind !== "checkpoint") continue;
     const note = [art.kind, art.step !== null ? `step ${art.step}` : null].filter(Boolean).join(" · ");
-    rows.push(rowFor({ host: art.host, path: art.path }, dir, { icon: art.kind === "checkpoint" ? "box" : iconOf(art.path), size: art.size, note }));
+    rows.push(rowFor({ host: art.host, path: art.path }, dir, { icon: art.kind === "checkpoint" ? "box" : iconOf(art.path), size: art.size, note,rawPath:art.path,environmentId:record.environment_id,cleaned:cleanedArtifact(art.path,record.environment_id,detail.cleaned) }));
   }
   return rows;
 }

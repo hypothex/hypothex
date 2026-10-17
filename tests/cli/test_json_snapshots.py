@@ -24,7 +24,11 @@ from typer.testing import CliRunner
 from hypothex.cli.main import app
 from hypothex.core import control
 from hypothex.core.context import Context
+from hypothex.core.fsutil import read_yaml, write_yaml
+from hypothex.core.storage import CleanItem, record_cleaned
+from hypothex.core.sweeps import load_sweep, save_sweep
 from tests.api.envserver import remote_hub
+from tests.factories import git
 
 runner = CliRunner()
 PY = sys.executable
@@ -127,6 +131,21 @@ def test_local_commands_keep_their_json_keys(
     toy_repo: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(toy_repo)
+    config_path = toy_repo / "hypothex.yaml"
+    config = read_yaml(config_path)
+    config["tasks"]["toy-acc"]["baselines"] = [
+        {
+            "name": "Reference study",
+            "values": {"accuracy": 0.8},
+            "std": {"accuracy": 0.01},
+            "source": "doi:10.1000/example",
+            "metric_version_equivalent": {"accuracy": "v1"},
+            "note": "Synthetic reference",
+        }
+    ]
+    write_yaml(config_path, config)
+    git(toy_repo, "add", "hypothex.yaml")
+    git(toy_repo, "commit", "-qm", "Add synthetic paper reference")
     # two seed groups: one with two seeds (stats, the best), one single seed
     run = ["run", "-t", "toy-acc", "--seed"]
     first = hx(*run, "1", "-H", "baseline", "--", PY, "-c", WRITE_PREDS)
@@ -140,18 +159,50 @@ def test_local_commands_keep_their_json_keys(
     for run_id in sweep["run_ids"]:
         control.wait_for_run(ctx, run_id, timeout=60)
     sweep_id = sweep["spec"]["id"]
-    check_snapshots(
-        {
-            "projects": hx("projects"),
-            "tasks": hx("tasks"),
-            "task show": hx("task", "show", "toy-acc"),
-            "leaderboard": hx("leaderboard", "toy-acc"),
-            "runs": hx("runs"),
-            "show": hx("show", first["run_id"]),
-            "sweep show": hx("sweep", "show", sweep_id),
-            "sweeps": hx("sweeps"),
-        }
+    owned = ctx.update_run(
+        first["run_id"],
+        "run.updated",
+        lambda r: r.model_copy(update={"owner": "alice"}),
     )
+    spec = load_sweep(ctx.layout, "toy", sweep_id)
+    save_sweep(ctx.layout, spec.model_copy(update={"owner": "alice"}))
+    record_cleaned(
+        ctx,
+        owned.run_id,
+        [
+            CleanItem(
+                project="toy",
+                run_id=owned.run_id,
+                host=owned.host,
+                environment_id=ctx.descriptor.environment_id,
+                kind="artifact",
+                artifact_kind="checkpoint",
+                path=str(ctx.run_dir(owned) / "old.ckpt"),
+                bytes=42,
+                mtime=None,
+                reason="Synthetic deleted checkpoint",
+            )
+        ],
+        actor="human:alice",
+        plan_id="snapshot-fixture",
+    )
+    outputs = {
+        "projects": hx("projects"),
+        "tasks": hx("tasks"),
+        "task show": hx("task", "show", "toy-acc"),
+        "leaderboard": hx("leaderboard", "toy-acc"),
+        "runs": hx("runs"),
+        "show": hx("show", first["run_id"]),
+        "sweep show": hx("sweep", "show", sweep_id),
+        "sweeps": hx("sweeps"),
+    }
+    assert any(r["owner"] == "alice" for r in outputs["runs"])
+    assert outputs["sweep show"]["spec"]["owner"] == "alice"
+    assert isinstance(outputs["sweep show"]["cost_complete"], bool)
+    assert outputs["leaderboard"]["baselines"][0]["name"] == "Reference study"
+    assert outputs["leaderboard"]["baselines"][0]["values"]["accuracy/value"] == 0.8
+    assert outputs["show"]["cleaned"][0]["environment_id"] == ctx.descriptor.environment_id
+    check_snapshots(outputs)
 
 
 def test_host_commands_keep_their_json_keys(

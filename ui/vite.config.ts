@@ -15,6 +15,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Disposable demo staging contains copies of this checkout; never reload on them.
+    watch: { ignored: ["**/e2e/.runs/**", "**/e2e/.results/**"] },
     proxy: {
       "/api": { target: API, ws: true },
       "/.well-known": { target: API },

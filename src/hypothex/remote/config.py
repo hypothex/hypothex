@@ -2,18 +2,29 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from hypothex.core.config import NAME_PATTERN, YAML_CYCLE, has_cycle, scan_yaml
 from hypothex.core.errors import ConfigError
 from hypothex.core.fsutil import read_yaml, write_yaml
 from hypothex.core.layout import Layout
+from hypothex.core.settings import ENV_NAME, resolve_secret, write_private
 
 HostKind = Literal["ssh", "slurm"]
 Route = Literal["ssh", "url", "local"]
@@ -157,6 +168,9 @@ class HostSpec(BaseModel):
     slurm: SlurmDefaults | None = None
     projects: dict[str, Annotated[str, Field(pattern=REMOTE_PATH)]] = Field(default_factory=dict)
 
+    token_env: str | None = Field(default=None, pattern=ENV_NAME)
+    """``route: url``: the variable holding the env server's bearer token."""
+
     @model_validator(mode="after")
     def _check_route_and_kind(self) -> HostSpec:
         """Require the fields each route and kind needs; check project names."""
@@ -168,6 +182,8 @@ class HostSpec(BaseModel):
             raise ValueError("kind slurm needs a slurm block (partition, time, gpus)")
         if self.kind != "slurm" and self.slurm is not None:
             raise ValueError("a slurm block is only allowed with kind: slurm")
+        if self.token_env is not None and self.route != "url":
+            raise ValueError("token_env is only for route url hosts")
         bad = sorted(p for p in self.projects if not re.fullmatch(NAME_PATTERN, p))
         if bad:
             raise ValueError(f"project names must match {NAME_PATTERN}: {', '.join(bad)}")
@@ -317,3 +333,140 @@ def save_hosts(layout: Layout, hosts: EnvironmentsFile) -> None:
     except ValidationError as exc:
         raise ConfigError(f"invalid hosts, not saved: {exc}") from exc
     write_yaml(environments_path(layout), data)
+
+
+HOST_TOKENS_FILE = "auth/host-tokens.json"
+"""``<hub home>/auth/host-tokens.json`` (0600): ``{host: {url, token}}`` from ``hx hosts pair``."""
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    port = parts.port or {"http": 80, "https": 443}.get(scheme)
+    return scheme, (parts.hostname or "").lower(), port
+
+
+def same_origin(a: str, b: str) -> bool:
+    """
+    Tell whether two URLs name the same server (scheme, host, port).
+
+    Parameters
+    ----------
+    a, b : str
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> same_origin("http://lab:8000/", "HTTP://LAB:8000")
+    True
+    >>> same_origin("http://lab:8000", "https://lab:8000")
+    False
+    """
+    return _origin(a) == _origin(b)
+
+
+def load_host_tokens(layout: Layout) -> dict[str, dict[str, str]]:
+    """
+    Read the paired host tokens.
+
+    Parameters
+    ----------
+    layout : Layout
+        The hub's home.
+
+    Returns
+    -------
+    dict of str to dict
+        Host name to ``{"url": <url it was paired at>, "token": ...}``; ``{}``
+        when the file is missing or unreadable. Entries without both keys are dropped.
+    """
+    try:
+        raw = json.loads((layout.home / HOST_TOKENS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(k): {"url": str(v["url"]), "token": str(v["token"])}
+        for k, v in raw.items()
+        if isinstance(v, dict) and v.get("url") and v.get("token")
+    }
+
+
+def save_host_token(layout: Layout, name: str, url: str, token: str) -> None:
+    """
+    Store the token a host pairing returned, bound to the URL it came from (mode 0600).
+
+    Parameters
+    ----------
+    layout : Layout
+    name : str
+        Host name.
+    url : str
+        The base URL of the pairing link (the server that issued the token).
+    token : str
+    """
+    tokens = load_host_tokens(layout)
+    tokens[name] = {"url": url.rstrip("/"), "token": token}
+    write_private(layout.home / HOST_TOKENS_FILE, json.dumps(tokens, indent=2, sort_keys=True))
+
+
+def forget_host_token(layout: Layout, name: str) -> None:
+    """
+    Remove a host's paired token.
+
+    Parameters
+    ----------
+    layout : Layout
+    name : str
+    """
+    tokens = load_host_tokens(layout)
+    if tokens.pop(name, None) is not None:
+        write_private(layout.home / HOST_TOKENS_FILE, json.dumps(tokens, indent=2, sort_keys=True))
+
+
+def host_token_env_names(layout: Layout) -> set[str]:
+    """
+    Return the ``token_env`` names of every configured host (kept out of runs).
+
+    Parameters
+    ----------
+    layout : Layout
+
+    Returns
+    -------
+    set of str
+        Empty when ``hosts.yaml`` is missing or invalid.
+    """
+    try:
+        hosts = load_hosts(layout)
+    except ConfigError:
+        return set()
+    return {spec.token_env for spec in hosts.environments.values() if spec.token_env}
+
+
+def host_token(layout: Layout, name: str, spec: HostSpec) -> SecretStr | None:
+    """
+    Return the bearer token the hub sends to a ``route: url`` host.
+
+    Parameters
+    ----------
+    layout : Layout
+        The hub's home.
+    name : str
+        Host name.
+    spec : HostSpec
+
+    Returns
+    -------
+    SecretStr or None
+        ``host-tokens.json`` first (only while ``spec.url`` is the origin it was
+        paired at), then the ``token_env`` variable; None without either.
+    """
+    paired = load_host_tokens(layout).get(name)
+    if paired and spec.url is not None and same_origin(paired["url"], spec.url):
+        return SecretStr(paired["token"])
+    return resolve_secret(layout, spec.token_env) if spec.token_env else None

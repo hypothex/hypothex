@@ -1,3 +1,4 @@
+import { hasScope, phase3Available } from "../api/scopes";
 /**
  * Top bar (spec section 3): breadcrumb from the route, the command palette button (⌘K),
  * the live-updates indicator and `New run` (the existing Launch dialog). On a task route
@@ -11,7 +12,7 @@ import { type ReactElement, useState } from "react";
 import { api } from "../api/client";
 import { useStreamStatus } from "../api/events";
 import type { RunDetail } from "../api/models";
-import { queryKeys, useLeaderboard, useProjects, useTaskRuns } from "../api/queries";
+import { queryKeys, useMe, useLeaderboard, useProjects, useTaskRuns } from "../api/queries";
 import { shortId } from "../charts/valueFormat";
 import { Button } from "../chrome/Button";
 import { Icon } from "../chrome/Icon";
@@ -65,6 +66,9 @@ export function crumbsFor(pathname: string, run?: RunCrumb | null): Crumb[] {
       return [{ label: "Examples" }, { label: `${shortId(p[1] ?? "")} vs ${shortId(p[2] ?? "")}` }];
     case "s":
       return [{ label: p[1] ?? "" }, { label: `sweep ${p[2] ?? ""}` }];
+    case "settings": return [{label:"Settings"}];
+    case "storage": return [{label:"Storage"}];
+    case "n": return [{label:p[1] ?? ""},{label:"Notebook"},...(p[2] ? [{label:p[2]}] : [])];
     case "hosts":
       return [{ label: "Hosts" }];
     case "queue":
@@ -117,6 +121,7 @@ export interface TopBarProps {
 }
 
 export function TopBar({ onSearch, navOpen, onToggleNav }: TopBarProps): ReactElement {
+  const me = useMe();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const parts = segments(pathname);
   const runId = parts[0] === "r" ? (parts[1] ?? null) : null;
@@ -142,7 +147,7 @@ export function TopBar({ onSearch, navOpen, onToggleNav }: TopBarProps): ReactEl
   const projects = useProjects();
   const navigate = useNavigateHref();
   const [launching, setLaunching] = useState(false);
-  const routeProject = parts[0] === "t" || parts[0] === "s" ? parts[1] : record?.project;
+  const routeProject = parts[0] === "t" || parts[0] === "s" || parts[0] === "n" ? parts[1] : record?.project;
   const routeTask = parts[0] === "t" ? (parts[2] ?? null) : (record?.task ?? null);
   const info = routeProject ? projects.data?.find((p) => p.project === routeProject) : projects.data?.[0];
   const target: LaunchTarget | null = info ? { project: info.project, task: routeProject ? routeTask : null, repo: info.repo } : null;
@@ -151,7 +156,7 @@ export function TopBar({ onSearch, navOpen, onToggleNav }: TopBarProps): ReactEl
   const board = useLeaderboard(scope?.project ?? "", scope?.task ?? "", [], { enabled: scope !== null });
   const [taskLaunch, setTaskLaunch] = useState<TaskLaunch | null>(null);
   const [launched, setLaunched] = useState<{ pathname: string; runs: LaunchedRuns } | null>(null);
-  const disabled = scope ? board.isPending || board.isError : target === null;
+  const disabled = !hasScope(me.data,"launch") || (scope ? board.isPending || board.isError : target === null);
   const title = scope
     ? board.isError
       ? `New run unavailable: ${board.error.message}`
@@ -191,6 +196,8 @@ export function TopBar({ onSearch, navOpen, onToggleNav }: TopBarProps): ReactEl
         <span>Search runs, tasks, paths</span>
         <kbd>{paletteShortcut()}</kbd>
       </button>
+      {routeProject && phase3Available(me.data) && <AppLink className="btn sm" href={hrefs.notebook(routeProject)}>Notebook</AppLink>}
+      {me.data?.auth === "on" && <span className="principal" aria-label={`${me.data.user}, ${me.data.scope} scope`}>@{me.data.user} <small>{me.data.scope[0]}</small></span>}
       <LiveDot />
       <Button
         variant="primary"

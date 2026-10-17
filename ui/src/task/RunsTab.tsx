@@ -7,9 +7,11 @@
  * config or run at a time). Filter and grouping share the sidebar's URL state.
  */
 import { type MouseEvent, type ReactElement, type ReactNode, useEffect, useRef, useState } from "react";
+import { auth } from "../api/auth";
+import { hasScope, mayAct } from "../api/scopes";
 import { api } from "../api/client";
 import type { TaskGroup, TaskRun, TaskRuns } from "../api/models";
-import { RUN_EVENT_INVALIDATES, useRenameRun } from "../api/queries";
+import { RUN_EVENT_INVALIDATES, useMe, useRenameRun } from "../api/queries";
 import { EmptyState } from "../chrome/EmptyState";
 import { FilterField } from "../chrome/FilterField";
 import { Icon } from "../chrome/Icon";
@@ -53,6 +55,8 @@ const GROUPS = [
 ] as const;
 
 export function RunsTab({ project, task, data, selection, onSelection, onOpenCharts, onOpenRun }: RunsTabProps): ReactElement {
+  const me=useMe();
+  const writable=hasScope(me.data,"launch");
   const listed = listIdentities(selection, data);
   const visible = listed.filter((i) => !i.hidden).map((i) => i.id);
   const columns = runsColumns(data);
@@ -99,6 +103,8 @@ export function RunsTab({ project, task, data, selection, onSelection, onOpenCha
     onOpenCharts();
   };
   const saveName = async (): Promise<void> => {
+    const credential=auth.capture();
+    if(!writable) return;
     const item = chosen[0];
     if (!item) return;
     const problem = nameProblem(text);
@@ -117,9 +123,10 @@ export function RunsTab({ project, task, data, selection, onSelection, onOpenCha
     }
     try {
       // all or none: a refusal puts the runs already renamed back
-      await renameEach(item.runs.map(toRenameTarget), name, (runId, to) => rename.mutateAsync({ runId, name: to }));
-      setForm(null);
+      await renameEach(item.runs.map(toRenameTarget), name, (runId, to) => rename.mutateAsync({ runId, name: to, credential }));
+      if(auth.current(credential.generation)) setForm(null);
     } catch (err) {
+      if(!auth.current(credential.generation)) return;
       setRenameError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -159,13 +166,13 @@ export function RunsTab({ project, task, data, selection, onSelection, onOpenCha
         >
           Tag
         </button>
-        <button type="button" className="btn sm" disabled={chosen.length === 0 || archive.pending} onClick={() => archive.run(runIds)}>
+        <button type="button" className="btn sm" disabled={!chosen.every(i=>i.runs.every(r=>mayAct(me.data,r.owner))) || chosen.length === 0 || archive.pending} onClick={() => archive.run(runIds)}>
           Archive
         </button>
         <button
           type="button"
           className="btn sm"
-          disabled={chosen.length !== 1}
+          disabled={!writable || chosen.length !== 1}
           title={chosen.length > 1 ? "Rename one config or run at a time" : undefined}
           onClick={() => {
             setText(chosen[0]?.baseName ?? "");
@@ -187,7 +194,7 @@ export function RunsTab({ project, task, data, selection, onSelection, onOpenCha
           }}
         >
           <input aria-label="Tag" value={text} placeholder="tag" onChange={(e) => setText(e.target.value)} />
-          <button type="submit" className="btn sm primary" disabled={!text.trim() || tag.pending}>
+          <button type="submit" className="btn sm primary" disabled={!writable || !text.trim() || tag.pending}>
             {`Add to ${runIds.length} run${runIds.length === 1 ? "" : "s"}`}
           </button>
         </form>

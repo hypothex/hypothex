@@ -1,0 +1,18 @@
+% requires \usepackage{booktabs}
+\begin{tabular}{lrrr}
+\toprule
+group & $n$ & acc/value $\uparrow$ & f1/value $\uparrow$ \\
+\midrule
+svm & 3 & \textbf{0.920 $\pm$ 0.010} [0.871, 0.954] & 0.890 $\pm$ 0.010 \\
+rf$^{\dagger}$ & 3 & 0.910 $\pm$ 0.005 [0.862, 0.947] & \textbf{0.910 $\pm$ 0.010} \\
+logreg & 3 & 0.880 ($\diamond{\times}3$) [0.826, 0.925] & 0.860 $\pm$ 0.010 \\
+knn$^{1}$ & 1 & 0.850 [0.794, 0.894] & 0.800 \\
+\midrule
+Smith\_2024 \& co & -- & 0.900 $\pm$ 0.004 & 0.870 \\
+Lee 2023$^{\ddagger}$ & -- & 0.930 & -- \\
+\bottomrule
+\end{tabular}
+% metric versions: acc@v2, f1@v1
+% $^{1}$ single seed $\cdot$ $\diamond$$\times$n identical seeds $\cdot$ $^{\dagger}$ within noise of best $\cdot$ $^{\ddagger}$ metric version differs from the paper
+% [lo, hi] 95\% test-set interval (wilson)
+% baselines: Smith\_2024 \& co --- arXiv:2401.01234; Lee 2023 --- doi:10.1000/xyz123

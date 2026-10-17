@@ -1,15 +1,12 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { auth } from "./auth";
 import { api, ApiError } from "./client";
-import { clearSessionQueries } from "./queries";
 import "../shell/kept.css";
 
 /** Validate through a protected read before mounting any page or live query. */
 export function AuthGate({ children }: { children: ReactNode }) {
   const state = useSyncExternalStore(auth.subscribe, auth.snapshot);
-  const qc = useQueryClient();
   const [token, setToken] = useState("");
   const [failed, setFailed] = useState(false);
 
@@ -29,17 +26,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
     }
   }
 
-  useEffect(() => auth.onReset(() => clearSessionQueries(qc)), [qc]);
   // Validate the starting credential once. StrictMode runs mount effects twice; a second
   // request still in flight when the page navigates fails and would lock (and forget) the
   // credential the first one accepted.
   const started = useRef<number | null>(null);
   useEffect(() => {
     const generation = auth.snapshot().generation;
-    if (started.current === generation) return;
+    if (state.status !== "validating" || started.current === generation) return;
     started.current = generation;
     void validate(generation);
-  }, []);
+  }, [state.generation, state.status]);
 
   if (state.status === "unlocked") return <>{children}</>;
   return (
@@ -50,6 +46,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         setToken("");
         setFailed(false);
         const generation = auth.select(supplied || null);
+        started.current = generation;
         void validate(generation);
       }}>
         <h1>Hypothex</h1>
@@ -66,6 +63,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         />
         <button type="submit" className="btn primary">Unlock</button>
         {state.status === "validating" && <p role="status">Connecting…</p>}
+        {state.status === "locked" && <p>401 · pair this device: <code>hx pair</code> <button type="button" className="btn sm" onClick={() => { void navigator.clipboard.writeText("hx pair").catch(() => {}); }}>Copy command</button></p>}
         {failed && state.status === "locked" && <p role="alert">Unable to unlock. Check token and connection.</p>}
       </form>
     </main>

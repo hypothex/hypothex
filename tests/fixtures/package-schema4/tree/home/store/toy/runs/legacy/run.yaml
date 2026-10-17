@@ -1,0 +1,61 @@
+{
+  "run_id": "legacy",
+  "project": "toy",
+  "task": "toy-acc",
+  "hypothesis": "",
+  "kind": "full",
+  "parent": null,
+  "stage": null,
+  "command": [
+    "echo",
+    "hi"
+  ],
+  "command_template": [
+    "echo",
+    "hi"
+  ],
+  "vars": {},
+  "params": {},
+  "cwd": "__HX_FIXTURE_ROOT__/toy",
+  "environment_id": "08a5795185bb4422a4c69ca5ae63f12d",
+  "host": "mac",
+  "executor": {
+    "type": "local",
+    "pid": null,
+    "pid_create_time": null,
+    "child_pid": null,
+    "host": null,
+    "gpus": [],
+    "slurm_job_id": null,
+    "node": null,
+    "queue_position": null
+  },
+  "git": {
+    "repo": null,
+    "commit": "c1",
+    "branch": null,
+    "dirty": false,
+    "diff_hash": null,
+    "untracked_count": 0,
+    "untracked": []
+  },
+  "datasets": [],
+  "seed": null,
+  "config_hash": "legacy",
+  "status": "finished",
+  "created_at": "2026-10-06T12:00:00Z",
+  "started_at": null,
+  "ended_at": null,
+  "end_reason": null,
+  "exit_code": null,
+  "artifacts": [],
+  "tags": [],
+  "starred": false,
+  "archived": false,
+  "name": null,
+  "created_by": "human",
+  "usage": null,
+  "cost": null,
+  "sweep_id": null,
+  "gpus_requested": 0
+}

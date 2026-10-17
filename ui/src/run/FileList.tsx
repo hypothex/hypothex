@@ -1,3 +1,4 @@
+import { cleanedLabel } from "../pages/components/cleaned";
 /** File rows (mockup .files): icon, name, path, size, copy on hover. */
 import { CopyButton } from "../pages/components/CopyButton";
 import { fmtBytes } from "../pages/components/format";
@@ -26,14 +27,14 @@ export function FileList({ rows }: { rows: FileRow[] }) {
         <li key={`${row.copy}-${i}`} className="file">
           <FileGlyph kind={row.icon} />
           <span className="fn" title={row.note}>
-            <span className="fname">{row.href ? <AppLink href={row.href}>{row.name}</AppLink> : row.name}</span>
+            <span className="fname">{row.href && !row.cleaned ? <AppLink href={row.href}>{row.name}</AppLink> : row.name}</span>
             {row.note ? <small>{row.note}</small> : null}
           </span>
           <span className="fp mono" title={row.copy}>
-            {row.path}
+            {row.cleaned ? <><s>{row.path}</s> <span title={`Deleted by ${row.cleaned.actor}`}>{cleanedLabel(row.cleaned)}</span></> : row.path}
           </span>
           <span className="fs">{row.size !== null ? fmtBytes(row.size) : ""}</span>
-          <CopyButton text={row.copy} label={row.name} />
+          {!row.cleaned && <CopyButton text={row.copy} label={row.name} />}
         </li>
       ))}
     </ul>

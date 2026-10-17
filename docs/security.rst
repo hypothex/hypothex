@@ -35,7 +35,8 @@ These checks are not authentication: any program that is not a browser can send
 Bearer token
 ------------
 
-Every API, file and MCP request needs ``Authorization: Bearer <token>``. Only
+In default token mode, every API, file and MCP request needs
+``Authorization: Bearer <token>``. Only
 ``GET``/``HEAD`` of the exact descriptor ``/.well-known/hypothex/environment`` and
 the installed UI's static resources/navigation are public. A
 missing or wrong token gets ``401`` (``{"type": "AuthError"}``); a WebSocket is closed
@@ -93,6 +94,9 @@ full. Existing nonbrowser WebSocket clients can use the Authorization header.
 Clients find the token like this:
 
 - ``hx`` and ``hx mcp`` send ``HYPOTHEX_HUB_TOKEN`` when it is set.
+- Else they use the saved login for that exact hub URL in the selected
+  ``--home`` (see :doc:`team`). A different selected home does not inherit a
+  login from the default home.
 - Else, for a hub on a loopback address, they read the token from that hub's
   ``<home>/serve/server.json`` (only when its port matches). A token is never read from
   that file for a hub on another machine.
@@ -107,6 +111,34 @@ in response headers or status text.
 .. code-block:: bash
 
    HYPOTHEX_HUB_URL=http://hub.example:7777 HYPOTHEX_HUB_TOKEN=... hx hosts status
+
+Team sessions
+-------------
+
+``hx serve --auth`` enables named users and revocable sessions. CLI clients use
+session bearer tokens; paired browsers use an HttpOnly, SameSite=Strict cookie.
+Pair redemption is public in this mode, but requires a valid, unexpired,
+single-use offer. The secret lives in the pairing URL fragment and is removed
+from browser history before redemption. See :doc:`team` for the pairing commands.
+
+Scopes are ``read``, ``launch`` and ``admin``. Launching on the hub itself requires
+admin; collaborators launch on configured hosts. Stop, archive and cancellation
+also check run ownership. Storage deletion and user administration require admin.
+The server derives ownership from the authenticated caller, and mutation receipts
+are scoped to that caller and route. Shared hosts execute as their serving Unix
+account, so use an account separate from the hub owner's account.
+
+HTTP authentication accepts a valid bearer first, then a valid browser cookie.
+HTTP MCP forwards that selected credential. WebSockets reject an invalid supplied
+bearer even if another credential is available. Browser sockets still use the
+single-use ticket protocol above; active sessions are rechecked at least every
+30 seconds. Revocation, expiry or disabling a user closes the socket with 4401.
+
+Users, hashed session secrets and revocations live in the separate private auth
+database and survive run-index rebuilds. Saved CLI credentials are private files;
+browser cookies are never exposed to JavaScript. A rejected session locks the UI
+until the user authenticates again. See :doc:`authentication` for storage and
+transaction details.
 
 SSH
 ---

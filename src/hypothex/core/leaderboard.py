@@ -18,7 +18,7 @@ import xxhash
 from pydantic import BaseModel, Field
 
 from hypothex.core import stats
-from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, parse_metric_key
+from hypothex.core.config import ProjectConfig, TaskKind, TaskSpec, metric_ref, parse_metric_key
 from hypothex.core.cost import add_costs
 from hypothex.core.errors import ConfigError
 from hypothex.core.headlines import (
@@ -149,6 +149,21 @@ class LeaderboardRow(BaseModel):
     """Actual comparable scored attempts; absent when their evidence is incomplete."""
 
 
+class BaselineRow(BaseModel):
+    """A paper's result as shown under a leaderboard (never a seed group, never best)."""
+
+    name: str
+    values: dict[str, float]
+    std: dict[str, float]
+    source: str
+    source_url: str
+    version_match: dict[str, bool]
+    """Metric name -> the paper's version equals the leaderboard's (missing -> False)."""
+    primary: float | None
+    delta_vs_best: float | None
+    """Best group's primary mean minus this value (higher is better), or the reverse."""
+
+
 class Leaderboard(BaseModel):
     """A task's ranked seed groups plus runs that need attention."""
 
@@ -169,6 +184,9 @@ class Leaderboard(BaseModel):
     """Display unit of the primary metric (``headlines.metric_unit``): ``ms``, ``$``, ..."""
     value_format: ValueFormat = "fraction"
     """How to show primary values and vs-best deltas (``headlines.value_format``)."""
+
+    baselines: list[BaselineRow] = Field(default_factory=list)
+    """Published results from ``hypothex.yaml`` (``TaskSpec.baselines``)."""
 
 
 # labels and ordering -------------------------------------------------------------
@@ -641,7 +659,7 @@ def cached_leaderboard(
 
 def _index_key(ctx: Context) -> tuple[Hashable, ...]:
     """
-    Identify the index state: its path, device/inode identity and generation.
+    Identify the index state by backend identity and generation.
 
     Parameters
     ----------
@@ -651,14 +669,17 @@ def _index_key(ctx: Context) -> tuple[Hashable, ...]:
     Returns
     -------
     tuple
-        ``(path, st_dev, st_ino, index_generation)``; the generation is read
-        before any build, so a write during a build only wastes the entry.
+        SQLite uses ``(path, st_dev, st_ino, index_generation)``; PostgreSQL
+        uses ``("postgresql", cache_identity, index_generation)``. Generation
+        is read before a build, so a write during a build only wastes the entry.
 
     Examples
     --------
     >>> _index_key(ctx)  # doctest: +SKIP
     ('/home/me/.hypothex/index.sqlite', 16777230, 1234567, 42)
     """
+    if ctx.index.dialect == "postgresql":
+        return ("postgresql", ctx.index.cache_identity, index_generation(ctx))
     identity = ctx.index.path.stat()
     return (str(ctx.index.path), identity.st_dev, identity.st_ino, index_generation(ctx))
 
@@ -1237,6 +1258,76 @@ def _repeat_observations(
     return result
 
 
+def baseline_url(source: str) -> str:
+    """
+    Turn a baseline source into a link.
+
+    Parameters
+    ----------
+    source : str
+        ``arXiv:<id>``, ``doi:<doi>``, or an ``https://`` URL.
+
+    Returns
+    -------
+    str
+        ``https://arxiv.org/abs/<id>``, ``https://doi.org/<doi>``, or the URL.
+
+    Examples
+    --------
+    >>> baseline_url("arXiv:1512.03385")
+    'https://arxiv.org/abs/1512.03385'
+    """
+    if source.startswith("arXiv:"):
+        return "https://arxiv.org/abs/" + source.removeprefix("arXiv:")
+    if source.startswith("doi:"):
+        return "https://doi.org/" + source.removeprefix("doi:")
+    return source
+
+
+def baseline_rows(spec: TaskSpec, board: Leaderboard) -> list[BaselineRow]:
+    """
+    Build the baseline rows of a leaderboard.
+
+    Parameters
+    ----------
+    spec : TaskSpec
+        The task (its ``baselines`` and ``metrics``).
+    board : Leaderboard
+        The built leaderboard (ranked rows and metric versions).
+
+    Returns
+    -------
+    list of BaselineRow
+        One per baseline, in file order, keys as ``metric/key``.
+    """
+    top = board.rows[0].primary if board.rows else None
+    best = top.mean if top is not None else None
+    out: list[BaselineRow] = []
+    for base in spec.baselines:
+        values = {metric_ref(k): v for k, v in base.values.items()}
+        primary = values.get(board.primary)
+        delta = None
+        if primary is not None and best is not None:
+            delta = best - primary if board.higher_is_better else primary - best
+        out.append(
+            BaselineRow(
+                name=base.name,
+                values=values,
+                std={metric_ref(k): v for k, v in base.std.items()},
+                source=base.source,
+                source_url=baseline_url(base.source),
+                version_match={
+                    m: base.equivalent_version(m) is not None
+                    and base.equivalent_version(m) == board.metric_versions.get(m)
+                    for m in spec.metrics
+                },
+                primary=primary,
+                delta_vs_best=delta,
+            )
+        )
+    return out
+
+
 def build_leaderboard(
     project: str,
     task: str,
@@ -1418,4 +1509,5 @@ def build_leaderboard(
     )
     board.headline = task_headline(board, reference=reference, gain_interval=gain_interval)
     board.stat_strip = task_stat_strip(board, reference=reference)
+    board.baselines = baseline_rows(spec, board)
     return board

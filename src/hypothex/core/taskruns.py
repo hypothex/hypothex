@@ -73,6 +73,9 @@ class TaskRun(BaseModel):
     gpu_hours: float | None
     cost_usd: float | None
 
+    owner: str | None = None
+    """The run's owner (``RunRecord.owner``); None with auth off or before phase 3."""
+
 
 class TaskGroup(BaseModel):
     """
@@ -331,6 +334,7 @@ def task_runs(
                 end_reason=r.end_reason,
                 exit_code=r.exit_code,
                 created_by=r.created_by,
+                owner=r.owner,
                 created_at=r.created_at,
                 started_at=r.started_at,
                 ended_at=r.ended_at,

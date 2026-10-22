@@ -30,6 +30,19 @@ jobs:
       - run: uv run pytest -q
       - run: uv run sphinx-build -W -b html docs docs/_build/html
 
+  sharing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.11"
+      - run: uv sync --locked --all-groups --extra hf --extra s3
+      - name: Provider contracts with optional SDKs (no cloud accounts)
+        run: uv run --extra hf --extra s3 pytest tests/sharing -q
+      - name: Minimum supported provider SDKs
+        run: uv run --isolated --with 'huggingface-hub==1.0.0' --with 'boto3==1.40.0' pytest tests/sharing -q
+
   ui:
     runs-on: ubuntu-latest
     defaults:

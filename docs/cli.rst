@@ -5,6 +5,10 @@ Data commands support ``--json`` for machine-readable output; agents should use
 it where offered by ``--help``. Human-readable timestamps use the local timezone;
 JSON timestamps retain their recorded timezone.
 
+Dataset/model publishing uses ``hx artifacts publish``, ``list``, ``show``,
+``download``, ``access``, ``share`` and ``visibility``. See :doc:`sharing` for
+Hugging Face and S3 setup, pinned receipts and verified downloads.
+
 Discover
 --------
 

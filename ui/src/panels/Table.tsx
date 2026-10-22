@@ -13,6 +13,9 @@ type SortDir = "asc" | "desc";
 export { MINUS };
 /** Rows rendered before the table stops and shows a count. */
 export const ROW_CAP = 500;
+/** Bound wide and sparse tables as well as tall ones. */
+const COLUMN_CAP = 50;
+const CELL_CAP = 10_000;
 
 /** Render any JSON cell value as short text. Missing values become an em dash. */
 export function fmtCell(v: unknown): string {
@@ -140,11 +143,14 @@ export function TablePanel({ result }: { result: PanelResult }) {
   const rows = result.rows as Row[];
   const meta = result.meta as Record<string, unknown> | undefined;
   const inline = meta?.source === "inline";
-  const cols = useMemo(() => panelColumns(rows, meta), [rows, meta]);
+  const allCols = useMemo(() => panelColumns(rows, meta), [rows, meta]);
+  const cols = allCols.slice(0, COLUMN_CAP);
   const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(null);
   const sorted = useMemo(() => (sort ? sortRows(rows, sort.key, sort.dir) : rows), [rows, sort]);
   if (rows.length === 0 && !(inline && cols.length > 0)) return <p style={S.empty}>No rows</p>;
 
+  const rowLimit = Math.min(ROW_CAP, Math.floor(CELL_CAP / Math.max(cols.length, 1)));
+  const renderedRows = sorted.slice(0, rowLimit);
   const numeric = new Set(cols.filter((c) => rows.some((r) => typeof r[c] === "number")));
   const toggle = (key: string) =>
     setSort((s) => {
@@ -173,7 +179,7 @@ export function TablePanel({ result }: { result: PanelResult }) {
           </tr>
         </thead>
         <tbody>
-          {sorted.slice(0, ROW_CAP).map((row, i) => (
+          {renderedRows.map((row, i) => (
             <tr key={i}>
               {cols.map((c) => {
                 const v = row[c];
@@ -198,9 +204,14 @@ export function TablePanel({ result }: { result: PanelResult }) {
         </tbody>
       </table>
       {rows.length === 0 && <p style={S.empty}>No rows</p>}
-      {rows.length > ROW_CAP && (
+      {rows.length > renderedRows.length && (
         <p style={S.foot}>
-          {fmtNum(ROW_CAP)} of {fmtNum(rows.length)} rows
+          {fmtNum(renderedRows.length)} of {fmtNum(rows.length)} rows
+        </p>
+      )}
+      {allCols.length > cols.length && (
+        <p style={S.foot}>
+          {fmtNum(cols.length)} of {fmtNum(allCols.length)} columns. Select columns in the view to show other fields.
         </p>
       )}
     </div>

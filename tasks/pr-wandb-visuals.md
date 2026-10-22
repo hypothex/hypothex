@@ -48,3 +48,19 @@ The independent follow-up review is LGTM with zero reproduced defects; see
 
 The follow-up is committed and pushed for fresh GitHub checks; these local results
 do not claim the new remote run has finished. PR remains open and unmerged.
+
+## October 23 correction and merge
+
+User authorized fixes, both review personas again, further fixes, and merge.
+Current main `05fd5ab` is integrated, retaining W&B, HF and S3 extras together.
+
+- [x] Preserve exact JSON steps in both binary history encodings, leaving metadata JSON unchanged.
+- [x] Skip duplicate history decoding after the immutable snapshot/hash, using persisted point counts; retain concurrent publication and index recovery.
+- [x] Bound sparse/declared table rendering with visible truncation counts and regressions.
+- [x] Verify and resolve GitHub's seed-invariant config-hash finding.
+- [ ] Run affected Python/UI tests, integrated static/build/docs checks, and full CI.
+- [ ] Re-review with adversarial and efficiency personas, resolve reproduced defects, push and merge the verified head.
+
+Correction regressions: 13 Python tests failed before the importer fixes; table
+SSR regressions failed on the prior unbounded renderer. Final checks and both
+independent review verdicts will be recorded in the PR before merging.

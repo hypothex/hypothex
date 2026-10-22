@@ -39,9 +39,13 @@ the protobuf step is used, or the zero-based history row number if neither exist
 Full scalar history is kept in ``metrics.jsonl``. Import initially indexes up to
 1,000 points for each of the first 256 metric names, with additional rows counted
 in provenance. An index rebuild uses Hypothex's normal history indexing policy.
+JSON step values in binary logs and exports retain exact integer precision;
+fractional steps and steps outside the signed 64-bit range are rejected.
 
 The run name, tags and configuration are retained. Display names are shortened
 to 80 characters and line breaks become spaces; the original name is preserved.
+Configuration hashes ignore the top-level ``seed``, so otherwise identical
+configurations share a seed group. The original seed remains in the saved config.
 ``env/wandb.json`` in the
 imported run folder records its original W&B identity, source file hash and path,
 summary values, and point counts. Summary values are provenance, not evaluated
@@ -56,6 +60,11 @@ The source is read without modification. Identical file bytes imported into the
 same format, project and task return the existing run, even if the file moved. Changed
 file bytes create a separate historical snapshot. Imported runs carry no executable
 command or source artifact links.
+Repeat imports still snapshot and hash the source to verify its identity, then
+reuse the published run and its saved point count without decoding or writing
+the metric history again. Older or damaged point-count provenance falls back
+to parsing the source. Interrupted index writes retain normal index recovery
+when the home is reopened.
 
 Finish the W&B run before importing it. Missing exit records, truncated records,
 invalid checksums and unsupported file versions fail before a run is published.

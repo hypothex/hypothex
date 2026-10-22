@@ -20,6 +20,7 @@ from hypothex.core.fsutil import write_yaml
 from hypothex.core.ids import utcnow
 from hypothex.core.naming import NAME_MAX, clean_run_name
 from hypothex.core.records import ExecutorInfo, MetricPoint, RunRecord, RunStatus
+from hypothex.core.seeds import config_hash
 from hypothex.core.store import RUN_SUBDIRS, dir_lock, run_lock
 from hypothex.core.thin import HistoryThinner
 from hypothex.importers.history_reader import iter_history_rows
@@ -74,9 +75,9 @@ def _number(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _json(value: str) -> Any:
+def _json(value: str, *, exact_numbers: bool = False) -> Any:
     try:
-        return json.loads(value)
+        return json.loads(value, parse_float=Decimal if exact_numbers else float)
     except (ValueError, RecursionError) as exc:
         raise RunError("invalid JSON value in W&B record") from exc
 
@@ -91,10 +92,10 @@ def _history_value(item: Any) -> Any:
     if kind == "none":
         return None
     if kind == "json":
-        return _json(item.json)
+        return _json(item.json, exact_numbers=True)
     if kind is not None:
         return getattr(item, kind)
-    return _json(item.value_json)
+    return _json(item.value_json, exact_numbers=True)
 
 
 def _updates(target: dict[str, Any], record: Any) -> None:
@@ -224,6 +225,25 @@ def _read(snapshot: Path, output: TextIO) -> _Data:
     return data
 
 
+def _existing_import(ctx: Context, project: str, run_id: str) -> WandbImportResult | None:
+    """Read a published import's point count without replaying its history."""
+    destination = ctx.layout.run_dir(project, run_id)
+    if not destination.exists():
+        return None
+    try:
+        provenance = json.loads((destination / "env" / "wandb.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(provenance, dict):
+        return None
+    count = provenance.get("metric_points")
+    if type(count) is not int or count < 0:
+        return None
+    return WandbImportResult(
+        record=ctx.store.read_record(project, run_id), imported=False, metric_points=count
+    )
+
+
 def import_wandb(
     ctx: Context, source: Path, repo: Path, *, task: str | None = None
 ) -> WandbImportResult:
@@ -289,6 +309,14 @@ def import_wandb(
         source_format = "wandb" if source.suffix.lower() == ".wandb" else source.suffix.lower()[1:]
         identity = json.dumps([config.project, task, source_format, content_hash]).encode()
         run_id = "wandb-" + hashlib.sha256(identity).hexdigest()[:32]
+        # Published folders are renamed atomically under this lock. Check only
+        # after snapshotting/hashing so copies and changed sources stay correct.
+        if ctx.layout.run_dir(config.project, run_id).exists():
+            with dir_lock(ctx.layout.home / ".wandb-import-lock"):
+                existing = _existing_import(ctx, config.project, run_id)
+                if existing is not None:
+                    ctx.register_project(repo)
+                    return existing
         folder = staging / "run"
         folder.mkdir()
         try:
@@ -311,9 +339,7 @@ def import_wandb(
             environment_id=ctx.descriptor.environment_id,
             host=ctx.descriptor.label,
             executor=ExecutorInfo(type="import"),
-            config_hash=hashlib.sha256(
-                json.dumps(data.config, sort_keys=True).encode()
-            ).hexdigest(),
+            config_hash=config_hash(data.config),
             status=RunStatus.FINISHED if data.exit_code == 0 else RunStatus.FAILED,
             created_at=created,
             started_at=data.start,

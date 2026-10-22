@@ -262,3 +262,81 @@ def test_interrupted_index_write_recovers_on_open(
     assert len(reopened.index.metric_points(records[0].run_id)) == 6
     retry = import_wandb(reopened, source, toy_repo)
     assert not retry.imported and retry.record.run_id == records[0].run_id
+
+
+@pytest.mark.parametrize("encoding", ["value_json", "json"])
+@pytest.mark.parametrize(
+    "step", ["9007199254740993.0", "9.007199254740993e15", "9223372036854775807.0"]
+)
+def test_binary_json_step_is_exact(
+    ctx: Context, toy_repo: Path, tmp_path: Path, encoding: str, step: str
+) -> None:
+    run, history, end = pb.Record(), pb.Record(), pb.Record()
+    run.run.run_id = "precise"
+    run.run.config.update.add(key="lr", value_json="0.001")
+    history.history.item.add(key="_step", **{encoding: step})
+    history.history.item.add(key="loss", **{encoding: "0.25"})
+    end.exit.exit_code = 0
+    source = tmp_path / "precise.wandb"
+    _write_records(source, [run, history, end])
+    result = import_wandb(ctx, source, toy_repo)
+    expected = 9223372036854775807 if step.startswith("922") else 9007199254740993
+    assert ctx.index.metric_points(result.record.run_id)[0].step == expected
+    assert ctx.store.read_metric_points("toy", result.record.run_id)[0].step == expected
+    assert result.record.params["lr"] == "0.001"
+
+
+@pytest.mark.parametrize("encoding", ["value_json", "json"])
+@pytest.mark.parametrize("step", ["1.0000000000000001", "9223372036854775808.0"])
+def test_binary_json_invalid_step_publishes_nothing(
+    ctx: Context, toy_repo: Path, tmp_path: Path, encoding: str, step: str
+) -> None:
+    run, history, end = pb.Record(), pb.Record(), pb.Record()
+    run.run.run_id = "invalid"
+    history.history.item.add(key="_step", **{encoding: step})
+    history.history.item.add(key="loss", **{encoding: "0.25"})
+    end.exit.exit_code = 0
+    source = tmp_path / "invalid.wandb"
+    _write_records(source, [run, history, end])
+    with pytest.raises(RunError, match="step"):
+        import_wandb(ctx, source, toy_repo)
+    assert not list(ctx.store.iter_records())
+
+
+def test_binary_imports_group_seed_repeats(ctx: Context, toy_repo: Path, tmp_path: Path) -> None:
+    from hypothex.core.leaderboard import group_id_for
+    from hypothex.core.seeds import config_hash
+
+    groups = []
+    for seed, rate in [(1, 0.1), (2, 0.1), (1, 0.2)]:
+        run, end = pb.Record(), pb.Record()
+        run.run.run_id = f"{seed}-{rate}"
+        run.run.config.update.add(key="seed", value_json=str(seed))
+        run.run.config.update.add(key="lr", value_json=str(rate))
+        end.exit.exit_code = 0
+        source = tmp_path / "seed.wandb"
+        _write_records(source, [run, end])
+        result = import_wandb(ctx, source, toy_repo, task="toy-acc")
+        assert result.record.config_hash == config_hash({"seed": seed, "lr": rate})
+        assert result.record.params["seed"] == str(seed)
+        groups.append(group_id_for(result.record))
+    assert groups[0] == groups[1]
+    assert groups[0] != groups[2]
+
+
+def test_binary_duplicate_does_not_decode_history(
+    ctx: Context, toy_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypothex.importers import wandb as importer
+
+    source = _log(tmp_path / "duplicate.wandb")
+    first = import_wandb(ctx, source, toy_repo)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("duplicate must not decode or spool history")
+
+    monkeypatch.setattr(importer, "_read", forbidden)
+    second = import_wandb(ctx, source, toy_repo)
+    assert not second.imported
+    assert second.record.run_id == first.record.run_id
+    assert second.metric_points == first.metric_points == 6

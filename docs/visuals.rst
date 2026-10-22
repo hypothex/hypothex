@@ -55,6 +55,14 @@ Empty rows are valid; declare table columns to retain an empty table's
 schema. ``columns=[]`` selects no columns. Row filters use exact equality or list
 membership; filtering runs does not filter inline data.
 
+The web table renders at most 50 columns, 500 rows, and 10,000 body cells per
+panel. Wider tables therefore show fewer rows (for example, 200 rows for 50
+columns). A footer reports the displayed and total row or column counts whenever
+either is truncated. Columns retain their declared order, or their first-seen
+order across all sparse rows when no columns are declared. Use ``Table(columns=[...])``
+to select fields outside the displayed prefix. These display limits do not remove
+saved data or schema; sorting a displayed column still considers every row.
+
 Stored run data
 ---------------
 

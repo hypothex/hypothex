@@ -1,5 +1,12 @@
 # Lessons
 
+## 2026-10-23 — importer and inline-table review corrections
+
+- Exercise numeric step parsing through each public input encoding, including binary history JSON; export-reader precision tests do not cover protobuf JSON fields.
+- Once an immutable import identity is known, check persisted completion before decoding and writing full history again. Keep the final publication check for concurrent first imports.
+- Bound table rendering by columns and cells as well as rows; sparse input can amplify into a large rectangular DOM.
+- Use the shared seed-invariant configuration fingerprint for imported runs and test actual group identities.
+
 ## 2026-10-22 — complete the requested PR handoff
 
 - Carry the user's requested handoff through commit, push, PR creation and review

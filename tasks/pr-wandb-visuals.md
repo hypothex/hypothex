@@ -80,3 +80,10 @@ Final-head Ubuntu/Python 3.13 CI passed 4,110 tests but failed the existing
 `visuals` entry interrupted the required `views` → `ui` adjacency. Move `visuals`
 after `ui`, preserving every guide and the existing navigation contract. This
 is a documentation-only change; importer and table review evidence is unchanged.
+
+The first ordering correction missed `tests/test_skill.py`, which requires `ui`
+immediately before `remote`. Its failure was reproduced locally. A repository-wide
+search for every `index.rst` reader identifies the complete protected sequence:
+`views` → `ui` → `remote` → `team` → `notifications` → `export` → `storage`.
+Place `visuals` before that sequence and verify all docs-index readers together;
+do not relax the existing assertions. Runtime implementation remains unchanged.

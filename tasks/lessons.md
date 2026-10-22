@@ -8,6 +8,7 @@
 - Use the shared seed-invariant configuration fingerprint for imported runs and test actual group identities.
 - Check distinct-sample counts too: importing a seed-invariant hash without the native seed value incorrectly treats same-seed reruns as independent samples.
 - Run documentation contract tests when changing navigation: a successful Sphinx build does not verify established guide ordering.
+- Locate every reader of a changed document, including tests outside documentation-named files. Preserve the full adjacency chain rather than fixing one pair and breaking its neighbor; `tests/test_skill.py` also constrains the docs index.
 
 ## 2026-10-22 — complete the requested PR handoff
 

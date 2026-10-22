@@ -12,9 +12,9 @@ Experiment tracker and control panel for AI researchers and their agents.
    cli
    sdk
    wandb
+   visuals
    views
    ui
-   visuals
    remote
    team
    notifications

@@ -126,6 +126,23 @@ you can read directly.
 
 ## Team and output
 
+- Publish an explicitly selected local dataset/model with optional HF/S3 extras:
+  `hx artifacts publish PATH --kind dataset --to hf://owner/repo --json` or
+  `hx artifacts publish PATH --kind model --to s3://bucket/prefix --json`.
+  Use a prepared folder or `--include`/`--exclude`; files are snapshotted and
+  fully hashed. New HF repos are private; existing visibility is preserved.
+  Provider credentials come from their SDKs, never command arguments.
+- Inspect `hx artifacts list --json` / `show RECEIPT_ID --json`; export the
+  latter as a receipt file for another machine. Download with
+  `hx artifacts download RECEIPT_ID_OR_JSON NEW_DIRECTORY --json`; existing
+  destinations are refused and all bytes verified before installation.
+- `hx artifacts access RECEIPT --json` inspects provider access.
+  `share RECEIPT --file PATH --expires-in 3600 --json` generates a pinned HF
+  URL or temporary S3 bearer URL only when sharing is requested. Do not store
+  signed URLs in notes/logs. `visibility RECEIPT public|private` is an explicit
+  HF repository-wide change affecting all revisions. S3 permissions stay in IAM
+  and bucket policies. These commands do not share Hypothex tasks or runs.
+
 - Paper table: `hx export <task> --format latex --json` (also `markdown`, `csv`;
   `--noise seed|test|both`). Compare runs: `hx export --runs a,b --json`.
   Use `--primary latency/p95` to rank a task table by another metric; compare

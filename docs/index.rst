@@ -20,6 +20,7 @@ Experiment tracker and control panel for AI researchers and their agents.
    notifications
    export
    storage
+   sharing
    gpus
    slurm
    sweeps

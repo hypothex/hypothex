@@ -1,6 +1,10 @@
 Python SDK
 ==========
 
+For provider publishing, verified downloads and sharing links, see
+:doc:`sharing` and the ``hypothex.sharing`` API. Logged run artifact paths
+remain separate from remote publication references.
+
 .. code-block:: python
 
    import hypothex as hx

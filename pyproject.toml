@@ -36,6 +36,12 @@ server = [
 wandb = [
     "wandb>=0.31,<1",
 ]
+hf = [
+    "huggingface-hub>=1.0,<2",
+]
+s3 = [
+    "boto3>=1.40,<2",
+]
 
 [dependency-groups]
 dev = [

@@ -1,5 +1,13 @@
 # Lessons
 
+## 2026-10-22 — complete the requested PR handoff
+
+- Carry the user's requested handoff through commit, push, PR creation and review
+  agents; do not stop at a local-only implementation when that handoff is expected.
+- Review agents must examine the published PR's exact head and base. Resolve
+  reproduced defects and distinguish final affected checks from older broad runs.
+- A request to open and review a PR does not itself authorize merging it.
+
 ## 2026-10-16 — review continuity and moving main
 
 - A delegated task without a final report and explicit verdict is unfinished. Never report it as running without current task evidence.

@@ -29,6 +29,7 @@ from sqlalchemy.exc import DBAPIError
 from typer.core import TyperGroup
 
 from hypothex._version import __version__
+from hypothex.cli.sharing import create_app as create_sharing_app
 from hypothex.core import queries as q
 from hypothex.core.config import (
     CONFIG_FILENAME,
@@ -167,6 +168,9 @@ def _ctx() -> Context:
 
 def _home_path() -> Path:
     return (_state.home or default_home()).expanduser().resolve()
+
+
+app.add_typer(create_sharing_app(_home_path), name="artifacts")
 
 
 def _listen(host: str, port: int) -> socket.socket:

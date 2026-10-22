@@ -16,6 +16,7 @@ Experiment tracker and control panel for AI researchers and their agents.
 - **Cost**: GPU hours at each host's price plus API spend, per run, seed group, sweep, host, and day.
 - **Web UI**: a run list that drives every chart, one colour per config, readable run names you can rename, a Compare table for eval tasks, run pages, live hosts and queue.
 - **Built for agents**: `hx --json` CLI, MCP server, HTTP API, and a skill file.
+- **Dataset and model publishing**: native Hugging Face repositories or S3, pinned receipts, SHA-256 verified downloads, and provider sharing links.
 - **Safe by default**: servers bind `127.0.0.1` and require a bearer token; `hx token` unlocks the UI; no secrets in run files.
 
 ## Install
@@ -61,6 +62,18 @@ hx sweep -t TASK -H "lr x beam" --grid lr=1e-4,3e-4 --grid beam=5,10 --seeds 3 \
 Try it with no setup: `hx --home /tmp/hx-demo demo --with-hosts && hx --home /tmp/hx-demo serve`.
 
 ## Documentation
+
+Publish a prepared dataset or model with optional provider integrations:
+
+```bash
+uv sync --extra hf --extra s3
+uv run --extra hf hx artifacts publish ./data --kind dataset --to hf://my-team/my-data
+uv run --extra s3 hx artifacts publish ./checkpoint --kind model --to s3://my-bucket/models/demo
+```
+
+New Hub repositories default to private; existing visibility is preserved.
+See [publishing and sharing](docs/sharing.rst) for authentication, receipts,
+verified downloads and S3 links.
 
 - [Getting started](docs/getting_started.rst) and a runnable example in [`examples/toy-classifier`](examples/toy-classifier)
 - [CLI](docs/cli.rst), [project file](docs/project_file.rst), [views](docs/views.rst), [web UI](docs/ui.rst), [SDK](docs/sdk.rst)

@@ -469,3 +469,12 @@ as its local owner regardless of the operating-system username and prints fresh
 pairing links. This applies only to homes with the seeded
 ``demo-team/team.json`` marker. Ordinary homes retain their OS-derived initial
 owner and refuse to bootstrap a different owner after initialization.
+
+W&B import
+----------
+
+``hx import wandb PATH [--repo PATH] [--task NAME] [--json]`` imports one completed
+local W&B run or exported history into the local home. ``PATH`` is a ``.wandb``
+file, its containing run folder, or a CSV/JSONL/JSON history export. Binary logs
+need the ``wandb`` extra; text exports do not. See :doc:`wandb` for supported data,
+repeat-import behavior and examples.

@@ -798,7 +798,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Pair */
+        /**
+         * Pair
+         * @description Redeem a single-use offer and issue a browser cookie or client token.
+         */
         post: operations["pair_api_v1_auth_pair_post"];
         delete?: never;
         options?: never;
@@ -813,7 +816,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Me */
+        /**
+         * Me
+         * @description Describe the authenticated caller and server authentication mode.
+         */
         get: operations["me_api_v1_auth_me_get"];
         put?: never;
         post?: never;
@@ -832,7 +838,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Logout */
+        /**
+         * Logout
+         * @description Revoke the current session and clear the browser cookie.
+         */
         post: operations["logout_api_v1_auth_logout_post"];
         delete?: never;
         options?: never;
@@ -849,7 +858,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Pairings */
+        /**
+         * Pairings
+         * @description Create a scope-limited pairing offer without storing its secret receipt.
+         */
         post: operations["pairings_api_v1_auth_pairings_post"];
         delete?: never;
         options?: never;
@@ -864,7 +876,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Sessions */
+        /**
+         * Sessions
+         * @description List the caller sessions, or all sessions for an administrator.
+         */
         get: operations["sessions_api_v1_auth_sessions_get"];
         put?: never;
         post?: never;
@@ -883,7 +898,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revoke */
+        /**
+         * Revoke
+         * @description Revoke an authorized session under a caller-bound receipt.
+         */
         post: operations["revoke_api_v1_auth_sessions__session_id__revoke_post"];
         delete?: never;
         options?: never;
@@ -898,7 +916,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Users */
+        /**
+         * Users
+         * @description List users for an administrator.
+         */
         get: operations["users_api_v1_auth_users_get"];
         put?: never;
         post?: never;
@@ -917,7 +938,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Disable */
+        /**
+         * Disable
+         * @description Disable a user and publish revocation events for their sessions.
+         */
         post: operations["disable_api_v1_auth_users__name__disable_post"];
         delete?: never;
         options?: never;
@@ -932,7 +956,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Notebook Days */
+        /**
+         * Notebook Days
+         * @description List the available notebook days for a project.
+         */
         get: operations["notebook_days_api_v1_projects__project__notebook_get"];
         put?: never;
         post?: never;
@@ -949,11 +976,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Notebook Day */
+        /**
+         * Notebook Day
+         * @description Read a notebook day and its linked run summaries.
+         */
         get: operations["notebook_day_api_v1_projects__project__notebook__day__get"];
-        /** Notebook Write */
+        /**
+         * Notebook Write
+         * @description Replace a notebook day using its optimistic concurrency hash.
+         */
         put: operations["notebook_write_api_v1_projects__project__notebook__day__put"];
-        /** Notebook Append */
+        /**
+         * Notebook Append
+         * @description Append an entry attributed to the authenticated caller.
+         */
         post: operations["notebook_append_api_v1_projects__project__notebook__day__post"];
         delete?: never;
         options?: never;
@@ -968,7 +1004,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Task Export */
+        /**
+         * Task Export
+         * @description Download a task leaderboard with the selected ranking and format.
+         */
         get: operations["task_export_api_v1_tasks__project___task__export_get"];
         put?: never;
         post?: never;
@@ -985,7 +1024,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Compare Export */
+        /**
+         * Compare Export
+         * @description Download a comparison of two to twenty runs.
+         */
         get: operations["compare_export_api_v1_compare_export_get"];
         put?: never;
         post?: never;
@@ -1002,7 +1044,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Digest */
+        /**
+         * Digest
+         * @description Build a project digest for the requested time window.
+         */
         get: operations["digest_api_v1_projects__project__digest_get"];
         put?: never;
         post?: never;
@@ -1021,7 +1066,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Digest Send */
+        /**
+         * Digest Send
+         * @description Queue an administrator-requested digest and save its notebook copy.
+         */
         post: operations["digest_send_api_v1_projects__project__digest_send_post"];
         delete?: never;
         options?: never;
@@ -1036,7 +1084,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Notify Route */
+        /**
+         * Notify Route
+         * @description Describe notification configuration without returning secrets.
+         */
         get: operations["notify_route_api_v1_notify_get"];
         put?: never;
         post?: never;
@@ -1055,7 +1106,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Notify Test */
+        /**
+         * Notify Test
+         * @description Send one administrator-requested channel test idempotently.
+         */
         post: operations["notify_test_api_v1_notify_test_post"];
         delete?: never;
         options?: never;
@@ -1070,7 +1124,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Storage */
+        /**
+         * Storage
+         * @description Report local and optionally remote storage usage.
+         */
         get: operations["storage_api_v1_storage_get"];
         put?: never;
         post?: never;
@@ -1089,7 +1146,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Make Plan */
+        /**
+         * Make Plan
+         * @description Persist a cleanup plan using the caller identity and receipt key.
+         */
         post: operations["make_plan_api_v1_storage_plan_post"];
         delete?: never;
         options?: never;
@@ -1106,7 +1166,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Apply */
+        /**
+         * Apply
+         * @description Apply an authorized cleanup plan with exact byte confirmation.
+         */
         post: operations["apply_api_v1_storage_plans__plan_id__apply_post"];
         delete?: never;
         options?: never;
@@ -1121,7 +1184,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Usage */
+        /**
+         * Usage
+         * @description List storage items measured on this environment.
+         */
         get: operations["usage_api_v1_storage_usage_get"];
         put?: never;
         post?: never;
@@ -1140,7 +1206,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Check */
+        /**
+         * Check
+         * @description Check cleanup candidates on their owning filesystem without deleting.
+         */
         post: operations["check_api_v1_storage_check_post"];
         delete?: never;
         options?: never;
@@ -1157,7 +1226,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Delete */
+        /**
+         * Delete
+         * @description Delete authorized candidates after authoritative filesystem checks.
+         */
         post: operations["delete_api_v1_storage_delete_post"];
         delete?: never;
         options?: never;
@@ -1291,7 +1363,7 @@ export interface components {
         };
         /**
          * CleanItem
-         * @description One path a plan would delete.
+         * @description One selected run/path/kind association; shared physical paths retain every owner.
          */
         CleanItem: {
             /** Project */
@@ -1442,6 +1514,7 @@ export interface components {
             /** Project */
             project?: string | null;
         };
+        JsonValue: unknown;
         /**
          * LaunchBody
          * @description Body of ``POST /api/v1/runs``: start a run in this environment.
@@ -1625,6 +1698,24 @@ export interface components {
         /**
          * PanelData
          * @description What a panel reads; which keys matter depends on the panel type.
+         *
+         *     Attributes
+         *     ----------
+         *     source : str or None
+         *         Named task data source, mutually exclusive with ``rows``.
+         *     rows : list of dict or None
+         *         Strict JSON records for table or Vega-Lite panels. Empty lists are
+         *         valid; payloads must meet ``MAX_INLINE_ROWS`` and ``MAX_INLINE_BYTES``.
+         *     fields : list of str or None
+         *         Projection columns, or all columns when omitted. For empty inline
+         *         datasets these names also declare the available schema.
+         *     filter : dict or None
+         *         Row equality filters applied before projection.
+         *
+         *     Examples
+         *     --------
+         *     >>> PanelData(rows=[{"loss": 0.25}], fields=["loss"]).source is None
+         *     True
          */
         PanelData: {
             /** Metrics */
@@ -1647,6 +1738,10 @@ export interface components {
             source?: ("runs" | "scores" | "metrics" | "predictions" | "samples" | "usage" | "traces" | "groups") | null;
             /** Fields */
             fields?: string[] | null;
+            /** Rows */
+            rows?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[] | null;
             /** Run Id */
             run_id?: string | null;
             /** Example Id */

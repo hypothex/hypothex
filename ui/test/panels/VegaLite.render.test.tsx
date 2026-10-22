@@ -118,3 +118,23 @@ describe("VegaLite resources with real Vega", () => {
     expect(images).toEqual([]);
   });
 });
+
+test("agent encodings render literal dotted and bracketed row fields", async () => {
+  const full = buildSpec({
+    mark: "bar",
+    encoding: {
+      x: { field: "params\\.lr\\[0\\]", type: "nominal" },
+      y: { field: "score", type: "quantitative" },
+    },
+  }, [{ "params.lr[0]": "first", score: 0.8 }, { "params.lr[0]": "second", score: 0.9 }],
+  themeConfig(TOKEN_FALLBACK.light, "light"));
+  const view = new View(parse(compile(full as unknown as TopLevelSpec).spec), { loader: DENY_LOADER, renderer: "none" });
+  try {
+    await view.runAsync();
+    const svg = await view.toSVG();
+    expect(svg).toContain("first");
+    expect(svg).toContain("second");
+    expect(svg).toContain("score: 0.8");
+    expect(svg).toContain("score: 0.9");
+  } finally { view.finalize(); }
+});

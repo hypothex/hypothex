@@ -3,8 +3,8 @@ Views
 
 A view is a dashboard for one task, written as YAML: a title, an optional run filter,
 and a list of panels. Each task kind ships a preset view named ``overview``; you add
-your own views next to your code. Panel data is computed by the server; the UI and
-agents only read rows.
+your own views next to your code. Panels query stored run data or embed JSON rows computed by an agent.
+Use :doc:`visuals` to author them with typed Python classes.
 
 Task kinds
 ----------
@@ -104,10 +104,10 @@ distribution   Sample distributions (ECDF) with p50, p95, p99; ``scale: log`` fo
                ``render: table`` draws the percentile table, with the change vs the task's
                ``baseline`` group and a 95% bootstrap CI over repeats.
 grid           Items by groups; each cell is the fraction of seeds that solved the item.
-table          Raw rows from a ``source``; with ``fields``, only those columns are drawn.
+table          Raw rows from a ``source`` or ``data.rows``; with ``fields``, only those columns are drawn.
 trace          The steps of one agent attempt (``data.run_id``, ``data.example_id``).
 markdown       Static ``text``.
-vega_lite      A Vega-Lite ``spec`` drawn over rows from a ``source``. Rows arrive inline
+vega_lite      A Vega-Lite ``spec`` drawn over ``source`` or ``data.rows``. Rows arrive inline
                only: ``url``, ``href``, ``embedOptions`` (at any depth) and ``image``
                marks are rejected.
 compare        Chosen datasets side by side for an eval task whose score keys have

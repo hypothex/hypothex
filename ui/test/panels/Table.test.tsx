@@ -177,3 +177,27 @@ test("group_id folds into the label column, whose tooltip keeps the id", () => {
   const cell = container.querySelectorAll("tbody td")[1];
   expect(cell?.getAttribute("title")).toBe("base recipe\n9b8c87bd@3d9e1a7");
 });
+
+describe("agent-computed inline rows", () => {
+  test("preserves arbitrary columns and values without run-specific interpretation", () => {
+    const result: PanelResult = {
+      type: "table", title: "Custom",
+      rows: [{ label: "Agent label", group_id: "independent data", run_id: "long-custom-identifier", "usage.usd": 2 }],
+      meta: { source: "inline", columns: ["label", "group_id", "run_id", "usage.usd"] },
+    };
+    expect(panelColumns(result.rows as Record<string, unknown>[], result.meta)).toEqual(result.meta?.columns as string[]);
+    const { container } = render(<TablePanel result={result} />);
+    expect([...container.querySelectorAll("th")].map((el) => el.textContent)).toEqual(["label", "group_id", "run_id", "usage.usd"]);
+    expect(screen.getByText("independent data")).toBeTruthy();
+    expect(screen.getByText("long-custom-identifier")).toBeTruthy();
+    expect(container.querySelector("a")).toBeNull();
+    expect(screen.getByText("Agent label").getAttribute("title")).toBe("Agent label");
+  });
+
+  test("keeps declared columns on an empty inline table", () => {
+    const { container } = render(<TablePanel result={{ type: "table", title: "Empty", rows: [], meta: { source: "inline", columns: ["score"] } }} />);
+    expect(container.querySelector("th")?.textContent).toBe("score");
+    expect(screen.getByText("No rows")).toBeTruthy();
+    expect(panelColumns([{ a: 1 }], { source: "inline", columns: [] })).toEqual([]);
+  });
+});

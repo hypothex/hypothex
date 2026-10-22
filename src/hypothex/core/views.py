@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import difflib
+import json
+import math
 import re
 from datetime import datetime
 from itertools import islice
@@ -14,9 +16,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from hypothex.core.config import (
@@ -92,6 +96,12 @@ VEGA_MAX_DEPTH = 64
 VEGA_MAX_NODES = 10_000
 MAX_PANEL_REFS = 100
 """Most entries in one panel's ``data.metrics``; each one is a value per run."""
+MAX_INLINE_ROWS = 2000
+"""Maximum number of inline rows accepted by a table or Vega-Lite panel."""
+MAX_INLINE_BYTES = 1024 * 1024
+"""Maximum UTF-8 bytes in compact JSON serialization of one panel's inline rows."""
+MAX_INLINE_DEPTH = 64
+"""Maximum collection nesting in inline JSON rows, including the rows list."""
 NO_ANCHORS = "YAML anchors and aliases are not allowed"
 
 Loc = tuple[str | int, ...]
@@ -143,7 +153,27 @@ class PanelLayout(BaseModel):
 
 
 class PanelData(BaseModel):
-    """What a panel reads; which keys matter depends on the panel type."""
+    """
+    What a panel reads; which keys matter depends on the panel type.
+
+    Attributes
+    ----------
+    source : str or None
+        Named task data source, mutually exclusive with ``rows``.
+    rows : list of dict or None
+        Strict JSON records for table or Vega-Lite panels. Empty lists are
+        valid; payloads must meet ``MAX_INLINE_ROWS`` and ``MAX_INLINE_BYTES``.
+    fields : list of str or None
+        Projection columns, or all columns when omitted. For empty inline
+        datasets these names also declare the available schema.
+    filter : dict or None
+        Row equality filters applied before projection.
+
+    Examples
+    --------
+    >>> PanelData(rows=[{"loss": 0.25}], fields=["loss"]).source is None
+    True
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -157,6 +187,8 @@ class PanelData(BaseModel):
     pick: Literal["best", "latest", "all"] | None = None
     source: Source | None = None
     fields: list[str] | None = None
+    rows: list[dict[str, JsonValue]] | None = Field(None, max_length=MAX_INLINE_ROWS)
+    """Inline JSON records for table/Vega-Lite panels, instead of a named source."""
     run_id: str | None = None
     example_id: str | None = None
     step_metric: str | None = None
@@ -168,6 +200,28 @@ class PanelData(BaseModel):
     model: str | None = None
     """Compare only: the model part of the score keys; None matches every model."""
 
+    @field_validator("rows", mode="before")
+    @classmethod
+    def _inline_rows(cls, value: Any) -> Any:
+        """Reject oversized, cyclic, nonfinite, or non-JSON input before coercion."""
+        if value is None:
+            return value
+        if not isinstance(value, list):
+            raise ValueError("inline rows must be a list of JSON objects")
+        if len(value) > MAX_INLINE_ROWS:
+            raise ValueError(f"inline data has at most {MAX_INLINE_ROWS} rows")
+        if any(not isinstance(row, dict) for row in value):
+            raise ValueError("inline rows must be a list of JSON objects")
+        _check_inline_json(value)
+        return value
+
+    @model_validator(mode="after")
+    def _one_row_source(self) -> PanelData:
+        """Prevent an inline dataset from silently replacing a named source."""
+        if self.rows is not None and self.source is not None:
+            raise ValueError("data.source and data.rows are mutually exclusive")
+        return self
+
     @field_validator("metrics", "datasets")
     @classmethod
     def _few_metrics(cls, value: list[str] | None, info: ValidationInfo) -> list[str] | None:
@@ -177,6 +231,79 @@ class PanelData(BaseModel):
                 f"a panel lists at most {MAX_PANEL_REFS} {info.field_name}, not {len(value)}"
             )
         return value
+
+
+def _check_inline_json(value: Any) -> None:
+    """Check strict JSON types and the exact compact UTF-8 byte budget in one walk."""
+    size = 0
+    active: set[int] = set()
+
+    def add(amount: int) -> None:
+        nonlocal size
+        size += amount
+        if size > MAX_INLINE_BYTES:
+            raise ValueError(f"inline rows exceed {MAX_INLINE_BYTES} serialized bytes")
+
+    def walk(node: Any, depth: int) -> None:
+        if type(node) in (dict, list):
+            if depth > MAX_INLINE_DEPTH:
+                raise ValueError(f"inline rows exceed {MAX_INLINE_DEPTH} nesting levels")
+            if id(node) in active:
+                raise ValueError("inline rows must not contain cycles")
+            active.add(id(node))
+            add(2 + max(0, len(node) - 1))  # delimiters and commas
+            if isinstance(node, dict):
+                for key, child in node.items():
+                    if not isinstance(key, str):
+                        raise ValueError("inline row object keys must be strings")
+                    walk(key, depth + 1)
+                    add(1)  # colon
+                    walk(child, depth + 1)
+            else:
+                for child in node:
+                    walk(child, depth + 1)
+            active.remove(id(node))
+        elif node is None or type(node) in (str, bool, int, float):
+            if isinstance(node, float) and not math.isfinite(node):
+                raise ValueError("inline rows must contain only finite numbers")
+            # Refuse giant strings before creating an escaped serialization.
+            if isinstance(node, str) and len(node) > MAX_INLINE_BYTES:
+                raise ValueError(f"inline rows exceed {MAX_INLINE_BYTES} serialized bytes")
+            try:
+                add(len(json.dumps(node, ensure_ascii=False, allow_nan=False).encode("utf-8")))
+            except (UnicodeError, OverflowError):
+                raise ValueError("inline rows must contain JSON-compatible values") from None
+        else:
+            raise ValueError("inline rows must contain JSON-compatible values")
+
+    walk(value, 1)
+
+
+def inline_row_fields(data: PanelData) -> set[str]:
+    """
+    Return the field names available in an inline dataset.
+
+    Parameters
+    ----------
+    data : PanelData
+        Panel data containing inline rows and optional explicit columns.
+
+    Returns
+    -------
+    set of str
+        Union of the row keys, or explicit columns when there are no rows.
+        Named data sources contribute no fields.
+
+    Examples
+    --------
+    >>> inline_row_fields(PanelData(rows=[], fields=["loss"]))
+    {'loss'}
+    """
+    if data.rows is None:
+        return set()
+    if not data.rows:
+        return set(data.fields or [])
+    return {key for row in data.rows for key in row}
 
 
 def _default_noise() -> list[Noise]:
@@ -200,6 +327,13 @@ class PanelSpec(BaseModel):
     scale: Literal["linear", "log"] = "linear"
     render: Literal["chart", "table", "bars"] = "chart"
     """``table`` for distribution tables; ``table`` (the default) or ``bars`` for compare."""
+
+    @model_validator(mode="after")
+    def _inline_panel_type(self) -> PanelSpec:
+        """Limit inline datasets to the existing table and Vega-Lite renderers."""
+        if self.data.rows is not None and self.type not in ("table", "vega_lite"):
+            raise ValueError("data.rows applies only to table and vega_lite panels")
+        return self
 
 
 class ViewSpec(BaseModel):
@@ -489,13 +623,19 @@ def _filter_issues(
     flt = panel.data.filter or {}
     source_rows = panel.type in ("table", "vega_lite")
     source: Source = (panel.data.source or "runs") if source_rows else "runs"
-    allowed = _row_fields(source, known_fields, version=source_rows)
+    inline = panel.data.rows is not None
+    allowed = (
+        inline_row_fields(panel.data)
+        if inline
+        else _row_fields(source, known_fields, version=source_rows)
+    )
     out: list[tuple[Loc, str, str | None]] = []
     for key, want in flt.items():
         loc: Loc = (*at, "data", "filter", key)
-        if allowed and key not in allowed:
-            out.append((loc, f"unknown filter key {key} in {source}", _closest(key, allowed)))
-        elif key == FILTER_METRIC_COLUMNS.get(source) and known_metrics:
+        if (allowed or inline) and key not in allowed:
+            label = "inline" if inline else source
+            out.append((loc, f"unknown filter key {key} in {label}", _closest(key, allowed)))
+        elif not inline and key == FILTER_METRIC_COLUMNS.get(source) and known_metrics:
             for name in want if isinstance(want, list) else [want]:
                 if isinstance(name, str) and name not in known_metrics:
                     out.append((loc, f"unknown metric {name}", _closest(name, known_metrics)))
@@ -606,16 +746,23 @@ def _panel_issues(
         problem = _example_field_problem(data.y, known_fields)
         if problem is not None:
             out.append(((*at, "data", "y"), *problem))
-    if panel.type in ("table", "vega_lite") and data.source is None:
-        out.append(((*at, "data"), f"{panel.type} needs data.source", None))
-    allowed = _row_fields(data.source, known_fields, version=True) if data.source else set()
-    if allowed:
+    if panel.type in ("table", "vega_lite") and data.source is None and data.rows is None:
+        out.append(((*at, "data"), f"{panel.type} needs data.source or data.rows", None))
+    allowed = (
+        inline_row_fields(data)
+        if data.rows is not None
+        else _row_fields(data.source, known_fields, version=True)
+        if data.source
+        else set()
+    )
+    if allowed or data.rows is not None:
+        source_label = "inline" if data.rows is not None else data.source
         for j, name in enumerate(data.fields or []):
             if name not in allowed:
                 out.append(
                     (
                         (*at, "data", "fields", j),
-                        f"unknown field {name} in {data.source}",
+                        f"unknown field {name} in {source_label}",
                         _closest(name, allowed),
                     )
                 )
@@ -711,7 +858,8 @@ def validate_view_text(
     problems (unknown metric or field, missing ``source``/``text``/``spec``,
     duplicate titles) return the parsed view plus issues, so a preview can still
     render; the view is valid only when the issue list is empty. Metric and field
-    checks are skipped when the matching known set is empty (a task with no runs).
+    checks for named sources are skipped when the matching known set is empty
+    (a task with no runs). Inline rows always declare their own field names.
 
     Parameters
     ----------

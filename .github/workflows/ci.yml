@@ -16,7 +16,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync --all-groups
+      - run: uv sync --all-groups --extra wandb
       # the bootstrap tests install the wheel offline with `uv tool install`; `uv sync`
       # installs from the lockfile and caches no index pages, so resolve once online here
       - name: Warm the uv cache for offline tool installs
@@ -27,7 +27,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run ty check src
-      - run: uv run pytest -q
+      - run: uv run --extra wandb pytest -q
       - run: uv run sphinx-build -W -b html docs docs/_build/html
 
   ui:

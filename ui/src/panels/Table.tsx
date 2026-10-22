@@ -125,6 +125,10 @@ const S = {
  */
 export function panelColumns(rows: Row[], meta: Record<string, unknown> | undefined): string[] {
   const listed = meta?.columns;
+  if (meta?.source === "inline") {
+    return Array.isArray(listed) && listed.every((c) => typeof c === "string")
+      ? listed as string[] : tableColumns(rows);
+  }
   if (Array.isArray(listed) && listed.length > 0 && listed.every((c) => typeof c === "string")) {
     return visibleColumns(listed as string[]);
   }
@@ -135,10 +139,11 @@ export function panelColumns(rows: Row[], meta: Record<string, unknown> | undefi
 export function TablePanel({ result }: { result: PanelResult }) {
   const rows = result.rows as Row[];
   const meta = result.meta as Record<string, unknown> | undefined;
+  const inline = meta?.source === "inline";
   const cols = useMemo(() => panelColumns(rows, meta), [rows, meta]);
   const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(null);
   const sorted = useMemo(() => (sort ? sortRows(rows, sort.key, sort.dir) : rows), [rows, sort]);
-  if (rows.length === 0) return <p style={S.empty}>No rows</p>;
+  if (rows.length === 0 && !(inline && cols.length > 0)) return <p style={S.empty}>No rows</p>;
 
   const numeric = new Set(cols.filter((c) => rows.some((r) => typeof r[c] === "number")));
   const toggle = (key: string) =>
@@ -161,7 +166,7 @@ export function TablePanel({ result }: { result: PanelResult }) {
                 style={{ ...S.th, textAlign: numeric.has(c) ? "right" : "left" }}
               >
                 <button type="button" style={S.sortBtn} title={c} onClick={() => toggle(c)}>
-                  {columnLabel(c)}
+                  {inline ? c : columnLabel(c)}
                 </button>
               </th>
             ))}
@@ -172,15 +177,15 @@ export function TablePanel({ result }: { result: PanelResult }) {
             <tr key={i}>
               {cols.map((c) => {
                 const v = row[c];
-                const text = typeof v === "number" && isDeltaColumn(c) ? fmtSigned(v) : fmtCell(v);
+                const text = !inline && typeof v === "number" && isDeltaColumn(c) ? fmtSigned(v) : fmtCell(v);
                 const align = typeof v === "number" || (numeric.has(c) && (v === null || v === undefined)) ? "right" : "left";
                 return (
                   <td
                     key={c}
-                    title={c === "label" && typeof row.group_id === "string" ? `${text}\n${row.group_id}` : text}
+                    title={!inline && c === "label" && typeof row.group_id === "string" ? `${text}\n${row.group_id}` : text}
                     style={{ ...S.td, textAlign: align }}
                   >
-                    {c === "run_id" && typeof v === "string" ? (
+                    {!inline && c === "run_id" && typeof v === "string" ? (
                       <a href={`/r/${encodeURIComponent(v)}`}>{shortId(v)}</a>
                     ) : (
                       text
@@ -192,6 +197,7 @@ export function TablePanel({ result }: { result: PanelResult }) {
           ))}
         </tbody>
       </table>
+      {rows.length === 0 && <p style={S.empty}>No rows</p>}
       {rows.length > ROW_CAP && (
         <p style={S.foot}>
           {fmtNum(ROW_CAP)} of {fmtNum(rows.length)} rows

@@ -387,7 +387,10 @@ def test_literal_without_near_match_lists_choices() -> None:
 @pytest.mark.parametrize(
     ("panel", "expected"),
     [
-        ("  - type: table\n", (3, "panels[0].data", "table needs data.source", None)),
+        (
+            "  - type: table\n",
+            (3, "panels[0].data", "table needs data.source or data.rows", None),
+        ),
         (
             "  - type: table\n    data: {source: runs, fields: [stauts]}\n",
             (4, "panels[0].data.fields[0]", "unknown field stauts in runs", "status"),

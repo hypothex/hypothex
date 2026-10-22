@@ -488,6 +488,8 @@ export interface PanelData {
   filter?: Record<string, unknown> | null;
   pick?: "best" | "latest" | "all" | null;
   source?: Source | null;
+  /** Inline JSON rows for table/Vega-Lite, mutually exclusive with source. */
+  rows?: Record<string, unknown>[] | null;
   fields?: string[] | null;
   run_id?: string | null;
   example_id?: string | null;

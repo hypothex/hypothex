@@ -76,6 +76,19 @@ Files live in `.hypothex/views/<task>/<name>.yaml` in the repo; commit them.
   `suggestion`) first; invalid views are never saved.
 - MCP: `list_views`, `get_view`, `add_view` (returns `issues` on failure),
   `query_view` (panel rows).
+- Python authoring: `from hypothex.visuals import DataSource, Encoding, Table, Chart, Dashboard`.
+  Build `DataSource(source="metrics", filter={"name": "loss"})` for run data or
+  `DataSource(rows=[{"model": "small", "score": 0.84}])` for agent-computed data.
+  `Table(title="Results", data=data, columns=["model", "score"])` selects columns;
+  `Chart(title="Scores", data=data, mark="bar", encoding={"x": Encoding(field="model",
+  type="nominal"), "y": Encoding(field="score", type="quantitative")})` plots rows.
+  Save with `Dashboard(title="Analysis", panels=[table, chart]).save(repo, task, name)`.
+  This validates and creates/replaces a local view; use `.to_yaml()` with MCP
+  `add_view` for a remote hub. Inline rows are snapshots: JSON only, finite numbers,
+  at most 2,000 rows/1 MiB per panel. A source and rows are mutually exclusive.
+  Encodings treat dots/brackets as literal field names; advanced Vega-Lite goes
+  in `Chart(spec={...})`. See `docs/visuals.rst`.
+
 
 ## Remote hosts and sweeps
 

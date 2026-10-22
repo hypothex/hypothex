@@ -87,3 +87,15 @@ search for every `index.rst` reader identifies the complete protected sequence:
 `views` → `ui` → `remote` → `team` → `notifications` → `export` → `storage`.
 Place `visuals` before that sequence and verify all docs-index readers together;
 do not relax the existing assertions. Runtime implementation remains unchanged.
+
+### UI test synchronization correction
+
+CI at `df984c3` passed 1,516 UI tests and timed out in the pairing-offer reset test.
+Independent and parent instrumentation traced the delay to the first synchronous
+`expect(HTMLElement).toBeNull()` inside `waitFor`, before React had flushed the
+external auth reset. Formatting that expected failure blocked the update for
+about 860 ms locally; a lightweight diagnostic predicate cleared in about 3 ms.
+The test now wraps response completion and credential reset in React `act`, then
+asserts the visible offer and its removal directly. No timeout increase or product
+code change. Ten focused repetitions passed in 16–46 ms each, followed by all 1,517
+UI tests and TypeScript. Independent review and current-head CI remain merge gates.

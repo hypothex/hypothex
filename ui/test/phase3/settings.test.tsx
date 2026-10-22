@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { auth } from "../../src/api/auth";
 import type { Principal, SessionRow } from "../../src/api/models";
 import { SettingsPage } from "../../src/pages/Settings";
@@ -13,7 +13,24 @@ test("collaborator settings reads own sessions only and never users/notify", asy
 test("permission pending makes no forbidden read", async () => { let finish!: (v: unknown) => void; const calls = mockApi({ "GET /api/v1/auth/me": () => new Promise((r) => { finish = r; }) }); const view = renderWithClient(<SettingsPage />); await waitFor(() => expect(calls.length).toBe(1)); expect(view.getByText("Loading permissions…")).toBeTruthy(); finish(p); await view.findByRole("region", { name: "Sessions" }); expect(calls.some((c) => c.url.includes("/users") || c.url.includes("/notify"))).toBe(false); });
 test("legacy capability performs no Phase 3 reads", async () => { const calls = mockApi({ "GET /api/v1/auth/me": new HttpReply(404, { error: "old hub" }), "GET /api/v1/projects": [] }); const view = renderWithClient(<SettingsPage />); await view.findByText("Scoped settings are unavailable on this hub."); expect(calls).toHaveLength(2); });
 test("own revoke locks, late completion cannot lock replacement", async () => { let finish!: (v: unknown) => void; mockApi({ "GET /api/v1/auth/sessions?user=alice": [s], "POST /api/v1/auth/sessions/s_one/revoke": () => new Promise((r) => { finish = r; }) }); const view = renderWithClient(<Sessions principal={p} />); fireEvent.click(await view.findByRole("button", { name: "Revoke Laptop" })); await waitFor(() => expect(finish).toBeDefined()); const next = auth.select("replacement"); auth.accept(next); finish({ ok: true }); await new Promise((r) => setTimeout(r, 10)); expect(auth.snapshot().generation).toBe(next); expect(auth.snapshot().status).toBe("unlocked"); });
-test("pairing offer freezes submitted scope and clears on credential reset", async () => { let finish!: (v: unknown) => void; const calls = mockApi({ "POST /api/v1/auth/pairings": () => new Promise((r) => { finish = r; }) }); const view = renderWithClient(<AddDevice principal={{ ...p, scope: "launch" }} />); fireEvent.change(view.getByLabelText("Device scope"), { target: { value: "launch" } }); fireEvent.click(view.getByRole("button", { name: "Create pairing link" })); await waitFor(() => expect(finish).toBeDefined()); expect(calls[0].body).toMatchObject({ user: "alice", scope: "launch", ttl_seconds: 300, new_user: false }); expect((view.getByLabelText("Device scope") as HTMLSelectElement).disabled).toBe(true); finish({ offer_id: "p_test", url: "http://127.0.0.1/pair#transient", expires_at: new Date(Date.now() + 60000).toISOString(), qr: "text QR" }); await view.findByLabelText("Pairing URL"); auth.select(null); await waitFor(() => expect(view.queryByLabelText("Pairing URL")).toBeNull()); });
+test("pairing offer freezes submitted scope and clears on credential reset", async () => {
+  let finish!: (v: unknown) => void;
+  const calls = mockApi({ "POST /api/v1/auth/pairings": () => new Promise((resolve) => { finish = resolve; }) });
+  const view = renderWithClient(<AddDevice principal={{ ...p, scope: "launch" }} />);
+  fireEvent.change(view.getByLabelText("Device scope"), { target: { value: "launch" } });
+  fireEvent.click(view.getByRole("button", { name: "Create pairing link" }));
+  await waitFor(() => expect(finish).toBeDefined());
+  expect(calls[0].body).toMatchObject({ user: "alice", scope: "launch", ttl_seconds: 300, new_user: false });
+  expect((view.getByLabelText("Device scope") as HTMLSelectElement).disabled).toBe(true);
+  await act(async () => {
+    finish({ offer_id: "p_test", url: "http://127.0.0.1/pair#transient", expires_at: new Date(Date.now() + 60000).toISOString(), qr: "text QR" });
+  });
+  expect((view.getByLabelText("Pairing URL") as HTMLInputElement).value).toBe("http://127.0.0.1/pair#transient");
+  // Credential changes originate outside React; flush their subscription/effects
+  // before asserting, rather than relying on the background scheduler to commit.
+  act(() => { auth.select(null); });
+  expect(view.queryByLabelText("Pairing URL")).toBeNull();
+});
 test("read user cannot broaden device scope", async () => { const view = renderWithClient(<AddDevice principal={p} />); const select = view.getByLabelText("Device scope") as HTMLSelectElement; expect([...select.options].map((o) => o.value)).toEqual(["read"]); expect(view.queryByLabelText("New user")).toBeNull(); });
 test("current self revoke locks immediately", async () => { mockApi({ "GET /api/v1/auth/sessions?user=alice": [s], "POST /api/v1/auth/sessions/s_one/revoke": { ok: true } }); const view = renderWithClient(<Sessions principal={p} />); fireEvent.click(await view.findByRole("button", { name: "Revoke Laptop" })); await waitFor(() => expect(auth.snapshot().status).toBe("locked")); });
 test("offer creation is never automatically retried without an idempotency receipt", async () => { const calls = mockApi({ "POST /api/v1/auth/pairings": () => { throw new Error("network lost"); } }); const view = renderWithClient(<AddDevice principal={p} />); fireEvent.click(view.getByRole("button", { name: "Create pairing link" })); await view.findByRole("alert"); expect(calls).toHaveLength(1); });

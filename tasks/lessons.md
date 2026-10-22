@@ -7,6 +7,7 @@
 - Bound table rendering by columns and cells as well as rows; sparse input can amplify into a large rectangular DOM.
 - Use the shared seed-invariant configuration fingerprint for imported runs and test actual group identities.
 - Check distinct-sample counts too: importing a seed-invariant hash without the native seed value incorrectly treats same-seed reruns as independent samples.
+- Run documentation contract tests when changing navigation: a successful Sphinx build does not verify established guide ordering.
 
 ## 2026-10-22 — complete the requested PR handoff
 

@@ -72,3 +72,11 @@ that grouped imports still lacked native seed values. A public `task_runs` probe
 reproduced two same-seed reruns counted as two samples. The follow-up retains
 integer seeds in `RunRecord.seed`, with a failing-before regression for grouping
 and sample counts, plus non-coercion coverage for other seed types.
+
+### CI documentation ordering correction
+
+Final-head Ubuntu/Python 3.13 CI passed 4,110 tests but failed the existing
+`test_ui_page_is_in_toctree_after_views` assertion. Reproduced locally: the new
+`visuals` entry interrupted the required `views` → `ui` adjacency. Move `visuals`
+after `ui`, preserving every guide and the existing navigation contract. This
+is a documentation-only change; importer and table review evidence is unchanged.

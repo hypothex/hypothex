@@ -46,6 +46,8 @@ class DataSource(BaseModel):
     rows : list of dict, optional
         Inline JSON records. Exactly one of source or rows is required. An empty
         list is valid. Limited to 2,000 rows and 1 MiB of serialized JSON.
+        Saved dashboards also share the whole-view YAML limits (100,000 parser
+        events and 64 nesting levels, including the view structure).
     filter : dict, optional
         Exact row matches; list values match any listed value.
 
@@ -348,6 +350,9 @@ class Dashboard(BaseModel):
     ) -> Path:
         """
         Validate and atomically create or replace a local repository view.
+
+        The complete view must fit the YAML limits documented in the views guide;
+        individual panels fitting their row/byte limits can still exceed those.
 
         Parameters
         ----------

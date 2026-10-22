@@ -1,5 +1,6 @@
 """Public agent authoring API and existing save/query transport integration."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -234,3 +235,16 @@ def test_mcp_put_query(ctx: Context, toy_repo: Path) -> None:
     assert saved["info"]["name"] == "agent-report"
     result = query_task_view(ctx, "toy-acc", name="agent-report", project="toy")
     assert result["panels"][0]["rows"][1] == {"model": "B", "score": 0.9}
+
+
+def test_save_respects_whole_view_budget_without_replacing(home: Path, toy_repo: Path) -> None:
+    from hypothex.core.views import MAX_INLINE_BYTES, MAX_INLINE_ROWS
+
+    path = _dashboard().save(toy_repo, "toy-acc", "agent-report", home=home)
+    original = path.read_text()
+    rows = [{f"column{j}": 0 for j in range(25)} for _ in range(MAX_INLINE_ROWS)]
+    assert len(json.dumps(rows, separators=(",", ":")).encode()) < MAX_INLINE_BYTES
+    wide = Dashboard(title="Wide", panels=[Table(title="Wide", data=DataSource(rows=rows))])
+    with pytest.raises(ConfigError, match="YAML too large"):
+        wide.save(toy_repo, "toy-acc", "agent-report", home=home)
+    assert path.read_text() == original

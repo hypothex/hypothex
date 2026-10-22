@@ -44,7 +44,14 @@ Inline rows are snapshots stored in the view. Recompute and save again to refres
 them. They must be JSON objects with string keys and finite numbers: convert
 DataFrames, NumPy scalars, datetimes, and other Python objects to JSON values first.
 Each panel accepts at most 2,000 rows, 1 MiB of compact UTF-8 JSON, and 64 nesting
-levels. Empty rows are valid; declare table columns to retain an empty table's
+levels. Saved dashboards must also fit the existing whole-view YAML limits:
+100,000 parser events and 64 nesting levels including the surrounding view
+structure. These limits apply across all panels, even when each dataset fits its
+own row/byte limits. Wide rows or repeated datasets can reach the whole-view limit
+first; reduce rows/columns or split the content into separate dashboards. A failed
+save reports the validation error and preserves the existing view.
+
+Empty rows are valid; declare table columns to retain an empty table's
 schema. ``columns=[]`` selects no columns. Row filters use exact equality or list
 membership; filtering runs does not filter inline data.
 

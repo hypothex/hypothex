@@ -152,3 +152,36 @@ Correction validation on frozen source, 2026-10-22:
 - Broader 3,878-test evidence above predates these HF/import corrections; the
   final focused tests cover this delta. No real cloud-account calls were made.
 - Both PR reviewers will independently re-review the pushed correction head.
+
+## 2026-10-23 efficiency correction
+
+The user requested resolving the new review's P2: HF downloads perform one
+serial metadata request per file, even with a warm cache (10,001 requests for
+10,000 files). The adversarial reviewer reproduced no additional defect.
+
+- [x] Add optional download preparation, preserving existing provider compatibility.
+- [x] HF preparation validates metadata in batches of at most 1,000 and returns
+  an operation-scoped adapter, bound to exact repository/type/commit and inventory.
+  Direct one-file downloads retain their metadata check. No global cache or
+  shared mutable preparation state; full size/SHA-256 checks remain mandatory.
+- [x] Regression tests cover request counts, batch boundaries, malformed/missing
+  metadata, reference/inventory isolation, failure cleanup and byte-budget order.
+- [ ] Verify current/minimum SDKs and base installation, Ruff/ty/docs, and replay
+  the independent efficiency probe. Push and obtain adversarial+efficiency
+  correction reviews against the exact pushed head; update PR evidence.
+
+Local correction evidence before push:
+- New regressions before implementation: 8 failed, 7 passed; failures cover the
+  request count, missing preparation and no-transfer-before-validation contracts.
+- Final sharing suite: 156 passed with current SDKs (4.13s), 156 passed with
+  isolated huggingface-hub 1.0.0 / boto3 1.40.0 (4.86s).
+- Isolated base installation: 112 passed, 44 optional-SDK cases skipped (2.36s).
+- Repository Ruff lint/format (326 files), ty src with/without provider extras,
+  git diff --check and Sphinx -W pass.
+- The unchanged independent real-SDK warm-cache probe now observes 11 metadata
+  requests for 10,000 files; 1,000 files at 5ms simulated request latency take
+  0.2735s and two requests (previously 7.2016s and 1,001 requests). No live
+  provider requests were used. Output retained externally as
+  pr29-oct23-fixed-hf-reproduction.json in the sharing review report directory.
+
+The correction is ready for exact-pushed-head adversarial and efficiency review.

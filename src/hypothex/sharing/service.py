@@ -27,7 +27,7 @@ from hypothex.sharing.models import (
     SharingError,
     Target,
 )
-from hypothex.sharing.provider import Provider
+from hypothex.sharing.provider import DownloadPreparer, Provider
 
 
 def get_provider(target: Target | Reference, *, profile: str | None = None) -> Provider:
@@ -222,6 +222,8 @@ def download(
     manifest = read_manifest(reference, provider=adapter)
     if max_bytes is not None and sum(f.size for f in manifest.files) > max_bytes:
         raise SharingError("publication exceeds the download byte budget")
+    if isinstance(adapter, DownloadPreparer):
+        adapter = adapter.prepare_download(reference, manifest)
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix=".hx-download-", dir=destination.parent) as temporary:

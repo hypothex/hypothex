@@ -95,6 +95,7 @@ class HuggingFaceProvider:
 
     def __init__(self, client: Any | None = None) -> None:
         self._injected_client = client
+        self._prepared_download: tuple[Reference, dict[str, FileEntry]] | None = None
 
     def _client(self) -> Any:
         if self._injected_client is None:
@@ -307,6 +308,52 @@ class HuggingFaceProvider:
                 raise SharingError("Hugging Face publication manifest is missing")
             return self._read_manifest(path)
 
+    def prepare_download(self, reference: Reference, manifest: Manifest) -> HuggingFaceProvider:
+        """Validate pinned metadata in batches for one complete download.
+
+        Parameters
+        ----------
+        reference : Reference
+            Exact Hub repository, type and immutable commit to download.
+        manifest : Manifest
+            Validated inventory after the caller applies its download byte budget.
+
+        Returns
+        -------
+        HuggingFaceProvider
+            Separate adapter bound to this reference and inventory. The original
+            provider remains reusable; no preparation state is shared between
+            downloads. File copies and full content verification remain required.
+        """
+        _check(reference)
+        if manifest.kind != reference.kind:
+            raise SharingError("Hugging Face prepared download kind does not match")
+        with _errors("download preparation"):
+            client = self._client()
+            for start in range(0, len(manifest.files), 1000):
+                batch = manifest.files[start : start + 1000]
+                entries = client.get_paths_info(
+                    repo_id=reference.location,
+                    paths=[entry.path for entry in batch],
+                    repo_type=reference.kind,
+                    revision=reference.revision,
+                )
+                by_path = {entry.path: entry for entry in entries}
+                if len(entries) != len(batch) or set(by_path) != {entry.path for entry in batch}:
+                    raise SharingError("Hugging Face download file inventory does not match")
+                for entry in batch:
+                    size = getattr(by_path[entry.path], "size", None)
+                    if type(size) is not int or size != entry.size:
+                        raise SharingError(
+                            "Hugging Face remote file size does not match the manifest"
+                        )
+            prepared = HuggingFaceProvider(client)
+            prepared._prepared_download = (
+                reference,
+                {entry.path: entry for entry in manifest.files},
+            )
+            return prepared
+
     def download_file(self, reference: Reference, entry: FileEntry, destination: Path) -> None:
         """
         Copy a pinned SDK cache file into the caller's staging destination.
@@ -317,7 +364,7 @@ class HuggingFaceProvider:
             Pinned Hub publication.
         entry : FileEntry
             File identity and expected size, checked against pinned provider
-            metadata before download; the core verifies its digest.
+            metadata in preparation or here; the core verifies its digest.
         destination : Path
             Newly allocated staging path, which must not already exist.
 
@@ -329,17 +376,22 @@ class HuggingFaceProvider:
         _check(reference)
         with _errors("file download"):
             client = self._client()
-            entries = client.get_paths_info(
-                repo_id=reference.location,
-                paths=[entry.path],
-                repo_type=reference.kind,
-                revision=reference.revision,
-            )
-            if len(entries) != 1 or entries[0].path != entry.path:
-                raise SharingError("Hugging Face publication file is missing")
-            size = getattr(entries[0], "size", None)
-            if type(size) is not int or size != entry.size:
-                raise SharingError("Hugging Face remote file size does not match the manifest")
+            if self._prepared_download is not None:
+                pinned, inventory = self._prepared_download
+                if reference != pinned or inventory.get(entry.path) != entry:
+                    raise SharingError("Hugging Face file does not match the prepared download")
+            else:
+                entries = client.get_paths_info(
+                    repo_id=reference.location,
+                    paths=[entry.path],
+                    repo_type=reference.kind,
+                    revision=reference.revision,
+                )
+                if len(entries) != 1 or entries[0].path != entry.path:
+                    raise SharingError("Hugging Face publication file is missing")
+                size = getattr(entries[0], "size", None)
+                if type(size) is not int or size != entry.size:
+                    raise SharingError("Hugging Face remote file size does not match the manifest")
             cached = Path(
                 client.hf_hub_download(
                     repo_id=reference.location,

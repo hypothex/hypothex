@@ -170,6 +170,11 @@ Existing destinations, even empty directories/symlinks, are refused. Concurrent
 creation of the destination is also refused atomically. Non-overwriting
 installation supports Linux and macOS. Failed transfers discard staging data.
 ``--max-bytes`` checks total declared content size before file transfers.
+For Hugging Face, file metadata is checked in batches of up to 1,000 after the
+byte-budget check. Each download's prepared metadata is bound to its exact
+repository, artifact type, commit and inventory; file size and full SHA-256
+verification still apply to every downloaded file. Custom providers that only
+implement individual file transfers continue to work without batch preparation.
 The Hugging Face SDK may also retain its normal local download cache.
 
 Python API

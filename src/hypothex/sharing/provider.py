@@ -1,7 +1,7 @@
 """Provider contract for content publication and individual file transfers."""
 
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from hypothex.sharing.models import (
     AccessInfo,
@@ -44,4 +44,13 @@ class Provider(Protocol):
 
     def set_visibility(self, reference: Reference, *, private: bool) -> AccessInfo:
         """Change Hub repository visibility; S3 must explicitly refuse."""
+        ...
+
+
+@runtime_checkable
+class DownloadPreparer(Protocol):
+    """Optional batch preparation without changing the single-file provider contract."""
+
+    def prepare_download(self, reference: Reference, manifest: Manifest) -> Provider:
+        """Return an operation-scoped adapter after validating pinned file metadata."""
         ...

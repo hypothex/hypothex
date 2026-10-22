@@ -46,6 +46,8 @@ The run name, tags and configuration are retained. Display names are shortened
 to 80 characters and line breaks become spaces; the original name is preserved.
 Configuration hashes ignore the top-level ``seed``, so otherwise identical
 configurations share a seed group. The original seed remains in the saved config.
+Integer seeds also populate the native seed field, so reruns with the same seed
+count as one sample. Other seed values remain in configuration without coercion.
 ``env/wandb.json`` in the
 imported run folder records its original W&B identity, source file hash and path,
 summary values, and point counts. Summary values are provenance, not evaluated

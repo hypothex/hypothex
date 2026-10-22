@@ -64,3 +64,11 @@ Current main `05fd5ab` is integrated, retaining W&B, HF and S3 extras together.
 Correction regressions: 13 Python tests failed before the importer fixes; table
 SSR regressions failed on the prior unbounded renderer. Final checks and both
 independent review verdicts will be recorded in the PR before merging.
+
+The first correction passed 398 affected Python tests and all 1,517 UI tests,
+plus repository Ruff/format, source ty, e2e TypeScript, build and Sphinx.
+Efficiency review approved `16b9ba0`; the independent adversarial review found
+that grouped imports still lacked native seed values. A public `task_runs` probe
+reproduced two same-seed reruns counted as two samples. The follow-up retains
+integer seeds in `RunRecord.seed`, with a failing-before regression for grouping
+and sample counts, plus non-coercion coverage for other seed types.

@@ -329,6 +329,7 @@ def import_wandb(
         except (WandbReadError, ImportError) as exc:
             raise RunError(str(exc)) from exc
         created = data.start or data.end or utcnow()
+        seed = data.config.get("seed")
         record = RunRecord(
             run_id=run_id,
             project=config.project,
@@ -340,6 +341,7 @@ def import_wandb(
             host=ctx.descriptor.label,
             executor=ExecutorInfo(type="import"),
             config_hash=config_hash(data.config),
+            seed=seed if type(seed) is int else None,
             status=RunStatus.FINISHED if data.exit_code == 0 else RunStatus.FAILED,
             created_at=created,
             started_at=data.start,

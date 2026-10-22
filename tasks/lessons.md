@@ -6,6 +6,7 @@
 - Once an immutable import identity is known, check persisted completion before decoding and writing full history again. Keep the final publication check for concurrent first imports.
 - Bound table rendering by columns and cells as well as rows; sparse input can amplify into a large rectangular DOM.
 - Use the shared seed-invariant configuration fingerprint for imported runs and test actual group identities.
+- Check distinct-sample counts too: importing a seed-invariant hash without the native seed value incorrectly treats same-seed reruns as independent samples.
 
 ## 2026-10-22 — complete the requested PR handoff
 

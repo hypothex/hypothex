@@ -306,11 +306,12 @@ def test_binary_json_invalid_step_publishes_nothing(
 def test_binary_imports_group_seed_repeats(ctx: Context, toy_repo: Path, tmp_path: Path) -> None:
     from hypothex.core.leaderboard import group_id_for
     from hypothex.core.seeds import config_hash
+    from hypothex.core.taskruns import task_runs
 
     groups = []
-    for seed, rate in [(1, 0.1), (2, 0.1), (1, 0.2)]:
+    for i, (seed, rate) in enumerate([(1, 0.1), (2, 0.1), (1, 0.2), (1, 0.1)]):
         run, end = pb.Record(), pb.Record()
-        run.run.run_id = f"{seed}-{rate}"
+        run.run.run_id = f"repeat-{i}"
         run.run.config.update.add(key="seed", value_json=str(seed))
         run.run.config.update.add(key="lr", value_json=str(rate))
         end.exit.exit_code = 0
@@ -319,9 +320,29 @@ def test_binary_imports_group_seed_repeats(ctx: Context, toy_repo: Path, tmp_pat
         result = import_wandb(ctx, source, toy_repo, task="toy-acc")
         assert result.record.config_hash == config_hash({"seed": seed, "lr": rate})
         assert result.record.params["seed"] == str(seed)
+        assert result.record.seed == seed
         groups.append(group_id_for(result.record))
     assert groups[0] == groups[1]
     assert groups[0] != groups[2]
+    assert groups[0] == groups[3]
+    board = task_runs(ctx, "toy-acc", project="toy")
+    repeats = next(group for group in board.groups if len(group.run_ids) == 3)
+    assert repeats.n == 2
+
+
+@pytest.mark.parametrize("seed", [None, True, "7", 7.5, {"value": 7}])
+def test_noninteger_seed_is_retained_without_coercion(
+    ctx: Context, toy_repo: Path, tmp_path: Path, seed: Any
+) -> None:
+    run, end = pb.Record(), pb.Record()
+    run.run.run_id = "untyped-seed"
+    run.run.config.update.add(key="seed", value_json=json.dumps(seed))
+    end.exit.exit_code = 0
+    source = tmp_path / "seed.wandb"
+    _write_records(source, [run, end])
+    result = import_wandb(ctx, source, toy_repo)
+    assert result.record.seed is None
+    assert result.record.params["seed"] == str(seed)
 
 
 def test_binary_duplicate_does_not_decode_history(

@@ -98,3 +98,12 @@ A typical loop
 5. Launch 3 seeds, or a sweep, with a one-sentence hypothesis.
 6. ``hx compare NEW BEST --json`` and ``hx examples BEST NEW --metric METRIC --json``.
 7. ``hx note RUN_ID "what I learned and what is next" --json``.
+
+Custom tables and charts
+------------------------
+
+Use ``hypothex.visuals`` to compose ``Dashboard`` objects with ``Table`` and
+``Chart`` panels. ``DataSource(source="metrics")`` reads stored run data;
+``DataSource(rows=[...])`` embeds JSON records computed by the agent. Save locally
+with ``dashboard.save(repo, task, name)``, or submit ``dashboard.to_yaml()`` through
+MCP ``add_view`` or the HTTP views API. See :doc:`visuals` for examples and limits.

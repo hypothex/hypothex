@@ -1,5 +1,16 @@
 # Lessons
 
+## 2026-10-23 — importer and inline-table review corrections
+
+- Exercise numeric step parsing through each public input encoding, including binary history JSON; export-reader precision tests do not cover protobuf JSON fields.
+- Once an immutable import identity is known, check persisted completion before decoding and writing full history again. Keep the final publication check for concurrent first imports.
+- Bound table rendering by columns and cells as well as rows; sparse input can amplify into a large rectangular DOM.
+- Use the shared seed-invariant configuration fingerprint for imported runs and test actual group identities.
+- Check distinct-sample counts too: importing a seed-invariant hash without the native seed value incorrectly treats same-seed reruns as independent samples.
+- Run documentation contract tests when changing navigation: a successful Sphinx build does not verify established guide ordering.
+- Locate every reader of a changed document, including tests outside documentation-named files. Preserve the full adjacency chain rather than fixing one pair and breaking its neighbor; `tests/test_skill.py` also constrains the docs index.
+- Wrap external-store mutations and controlled promise completions in React `act` in component tests. An immediate failing Bun assertion on a mounted DOM element can spend substantial time formatting the element and block the very update being awaited; measure the predicate before increasing a timeout.
+
 ## 2026-10-22 — complete the requested PR handoff
 
 - Carry the user's requested handoff through commit, push, PR creation and review

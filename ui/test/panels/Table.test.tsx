@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { PanelResult } from "../../src/panels/index";
 import { MINUS } from "../../src/charts/Scale";
 import { fmtNum, fmtSigned } from "../../src/charts/valueFormat";
@@ -176,4 +177,75 @@ test("group_id folds into the label column, whose tooltip keeps the id", () => {
   expect([...container.querySelectorAll("th")].map((th) => th.textContent)).toEqual(["run", "label", "seed"]);
   const cell = container.querySelectorAll("tbody td")[1];
   expect(cell?.getAttribute("title")).toBe("base recipe\n9b8c87bd@3d9e1a7");
+});
+
+describe("agent-computed inline rows", () => {
+  test("bounds sparse-table columns and total cells while reporting both counts", () => {
+    const rows = Array.from({ length: 201 }, (_, i) => ({ [`field_${i}`]: i }));
+    const result: PanelResult = { ...table(rows), meta: { source: "inline" } };
+    // Render the real component; keep this adversarial case small enough for SSR.
+    const html = renderToStaticMarkup(<TablePanel result={result} />);
+    expect((html.match(/<th /g) ?? []).length).toBe(50);
+    expect((html.match(/<td /g) ?? []).length).toBe(10_000);
+    expect(html).toContain("200 of 201 rows");
+    expect(html).toContain("50 of 201 columns");
+    expect([...html.matchAll(/<button[^>]*title="([^"]*)"/g)].map((m) => m[1]))
+      .toEqual(Array.from({ length: 50 }, (_, i) => `field_${i}`));
+    // Truncation is only a rendering decision; the sparse schema stays complete.
+    expect(panelColumns(rows, result.meta)).toHaveLength(201);
+  });
+
+  test("bounds declared schemas, including empty inline tables, in declared order", () => {
+    const columns = Array.from({ length: 80 }, (_, i) => `field_${79 - i}`);
+    for (const rows of [[], [{ field_79: "kept", field_0: "outside viewport" }]]) {
+      const result: PanelResult = { ...table(rows), meta: { source: "inline", columns } };
+      const html = renderToStaticMarkup(<TablePanel result={result} />);
+      expect((html.match(/<th /g) ?? []).length).toBe(50);
+      expect([...html.matchAll(/<button[^>]*title="([^"]*)"/g)].map((m) => m[1]))
+        .toEqual(columns.slice(0, 50));
+      expect(html).toContain("50 of 80 columns");
+      expect(panelColumns(rows, result.meta)).toEqual(columns);
+      if (rows.length === 0) expect(html).toContain("No rows");
+      else {
+        expect(html).toContain("kept");
+        expect(html).not.toContain("outside viewport");
+      }
+    }
+  });
+
+  test("sorting includes rows beyond the rendered row limit", () => {
+    const rows = Array.from({ length: ROW_CAP + 1 }, (_, i) => ({ rank: ROW_CAP + 1 - i }));
+    const { container } = render(<TablePanel result={{ ...table(rows), meta: { source: "inline" } }} />);
+    const btn = screen.getByRole("button", { name: "rank" });
+    expect(bodyCells(container, 0)[0]).toBe("501");
+    fireEvent.click(btn);
+    expect(bodyCells(container, 0)[0]).toBe("1");
+    fireEvent.click(btn);
+    expect(bodyCells(container, 0)[0]).toBe("501");
+    fireEvent.click(btn);
+    expect(bodyCells(container, 0)[0]).toBe("501");
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(ROW_CAP);
+  });
+
+  test("preserves arbitrary columns and values without run-specific interpretation", () => {
+    const result: PanelResult = {
+      type: "table", title: "Custom",
+      rows: [{ label: "Agent label", group_id: "independent data", run_id: "long-custom-identifier", "usage.usd": 2 }],
+      meta: { source: "inline", columns: ["label", "group_id", "run_id", "usage.usd"] },
+    };
+    expect(panelColumns(result.rows as Record<string, unknown>[], result.meta)).toEqual(result.meta?.columns as string[]);
+    const { container } = render(<TablePanel result={result} />);
+    expect([...container.querySelectorAll("th")].map((el) => el.textContent)).toEqual(["label", "group_id", "run_id", "usage.usd"]);
+    expect(screen.getByText("independent data")).toBeTruthy();
+    expect(screen.getByText("long-custom-identifier")).toBeTruthy();
+    expect(container.querySelector("a")).toBeNull();
+    expect(screen.getByText("Agent label").getAttribute("title")).toBe("Agent label");
+  });
+
+  test("keeps declared columns on an empty inline table", () => {
+    const { container } = render(<TablePanel result={{ type: "table", title: "Empty", rows: [], meta: { source: "inline", columns: ["score"] } }} />);
+    expect(container.querySelector("th")?.textContent).toBe("score");
+    expect(screen.getByText("No rows")).toBeTruthy();
+    expect(panelColumns([{ a: 1 }], { source: "inline", columns: [] })).toEqual([]);
+  });
 });

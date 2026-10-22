@@ -121,6 +121,8 @@ notify_app = typer.Typer(no_args_is_help=True, help="Slack and email notices (hu
 app.add_typer(notify_app, name="notify")
 storage_app = typer.Typer(no_args_is_help=True, help="Bytes on disk and cleanup of old artifacts.")
 app.add_typer(storage_app, name="storage")
+import_app = typer.Typer(no_args_is_help=True, help="Import historical experiment logs.")
+app.add_typer(import_app, name="import")
 SENT_GLYPH = {"sent": "✓", "failed": "✗", "pending": "…", "sending": "…", "skipped": "○"}
 KindOpt = Annotated[
     str | None,
@@ -888,6 +890,32 @@ def _status_cells(row: dict[str, Any]) -> list[Any]:
 
 
 # project ---------------------------------------------------------------------------
+@import_app.command("wandb")
+def import_wandb_command(
+    source: Annotated[
+        Path, typer.Argument(help="W&B run folder, .wandb file, or CSV/JSONL/JSON history export.")
+    ],
+    repo: RepoOpt = None,
+    task: Annotated[str | None, typer.Option("--task", "-t", help="Destination task.")] = None,
+    as_json: JsonFlag = False,
+) -> None:
+    """Import local W&B scalar history into this machine's Hypothex home."""
+    from hypothex.importers.wandb import import_wandb
+
+    result = import_wandb(_ctx(), source, repo or find_repo_root(Path.cwd()), task=task)
+    if as_json:
+        _print_json(
+            {
+                "record": result.record.model_dump(mode="json"),
+                "imported": result.imported,
+                "metric_points": result.metric_points,
+            }
+        )
+    else:
+        verb = "imported" if result.imported else "already imported"
+        typer.echo(f"{verb} {result.record.run_id} ({result.metric_points} scalar points)")
+
+
 @app.command()
 def init(
     project: Annotated[str | None, typer.Option(help="Project name (default: folder).")] = None,

@@ -101,3 +101,38 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+### Import existing W&B runs
+
+Install `hypothex[wandb]` (or `uv sync --extra wandb` in this checkout), then import
+one completed local W&B run from a project with `hypothex.yaml`:
+
+```sh
+hx import wandb ./wandb/offline-run-20261022_120000-abc123
+hx import wandb ./history.csv
+hx import wandb ./wandb-history.jsonl
+hx runs
+hx serve
+```
+
+Scalar history, steps, timestamps, config and run metadata appear in Hypothex
+without a W&B account. CSV and JSON/JSONL history exports are also supported and
+do not require the W&B extra. Reimporting identical bytes returns the existing run.
+See [W&B local logs](docs/wandb.rst) for details and limitations.
+
+### Agent-authored visuals
+
+Agents can build custom tables and charts from stored run data or computed JSON rows:
+
+```python
+from hypothex.visuals import Dashboard, DataSource, Table
+
+report = Dashboard(
+    title="Agent analysis",
+    panels=[Table(title="Results", data=DataSource(rows=[{"model": "small", "score": 0.84}]))],
+)
+report.save("/path/to/project", "train", "agent-report")
+```
+
+Use `Chart` and `Encoding` for charts, or `DataSource(source="metrics")` for live run
+data. See [the authoring guide](docs/visuals.rst) for chart examples and API details.

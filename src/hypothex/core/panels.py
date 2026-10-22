@@ -10,9 +10,9 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from hypothex.core.config import parse_metric_key, parse_metric_version
 from hypothex.core.context import Context
@@ -41,10 +41,12 @@ from hypothex.core.store import ProjectEntry
 from hypothex.core.taskruns import derived_names
 from hypothex.core.views import (
     VERSION_REF,
+    PanelData,
     PanelSpec,
     PanelType,
     RunFilter,
     ViewSpec,
+    inline_row_fields,
     vega_spec_problems,
 )
 
@@ -266,7 +268,8 @@ def query_panel(
     Compute one panel's rows.
 
     ``markdown`` panels and ``trace`` panels with ``data.run_id`` need no task
-    config; every other panel reads the task's runs (unarchived, oldest first),
+    config. Inline table/Vega-Lite datasets require a known task but do not read
+    its runs. Other panels read the task's runs (unarchived, oldest first),
     narrowed by ``runs_filter``, ``data.filter`` (matched against the flattened
     ``runs`` row; for ``table``/``vega_lite`` matched against each source row
     instead), and ``data.pick``.
@@ -355,6 +358,16 @@ def _panel(
     cache: _ViewCache,
 ) -> PanelResult:
     """Dispatch one panel; ``cache`` holds what the panels of a view share."""
+    if panel.data.rows is not None:
+        if panel.type not in ("table", "vega_lite"):
+            raise ConfigError("data.rows applies only to table and vega_lite panels")
+        # Queries can receive mutated models or models constructed without validation.
+        # Revalidate inline payloads at this boundary, including source exclusivity.
+        try:
+            data = PanelData.model_validate(dict(panel.data))
+        except ValidationError as exc:
+            raise ConfigError(exc.errors()[0]["msg"].removeprefix("Value error, ")) from None
+        panel = panel.model_copy(update={"data": data})
     if panel.type == "markdown":
         return _markdown(panel)
     if panel.type == "trace" and panel.data.run_id:
@@ -374,6 +387,9 @@ def _query(
 ) -> PanelResult:
     if task not in entry.config.tasks:
         raise ConfigError(f"unknown task {task!r} in project {entry.project!r}")
+    if panel.data.rows is not None:
+        scope = _Scope(ctx=ctx, entry=entry, task=task, runs=[], cache=cache)
+        return _HANDLERS[panel.type](scope, panel)
     runs = cache.runs_of(ctx, entry, task)
     if runs_filter is not None:
         runs = [r for r in runs if _run_matches(r, runs_filter)]
@@ -562,17 +578,32 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
     synthetic ``version`` field (``VERSION_REF``) is set on every full ``runs`` row
     before the filter, whatever ``fields`` lists, so ``filter: {version: p10}``
     works on a table that shows only ``status``. The task-level ``groups`` source
-    (``group_rows``) keeps exactly the listed ``fields``, in order. With ``fields``,
+    (``group_rows``) and inline rows keep exactly the listed ``fields``, in order.
+    Inline rows are copied and do not gain synthetic keys. With ``fields``,
     ``meta.columns`` lists them: the columns the table draws (per-run rows still carry
     ``run_id``, ``group_id``, ``label`` and ``seed`` for links and filters).
     """
-    source = panel.data.source or "runs"
+    inline = panel.data.rows is not None
+    if not inline and panel.data.source is None:
+        raise ConfigError(f"{panel.type} needs data.source or data.rows")
+    source = "inline" if inline else panel.data.source or "runs"
     fields = panel.data.fields
     versions = _run_versions(scope) if source == "runs" else {}
     rows: list[dict[str, Any]] = []
     total = 0
-    if source == "groups":
-        full: Iterable[dict[str, Any]] = group_rows(scope)
+    if source == "inline":
+        allowed = inline_row_fields(panel.data)
+        for key in fields or []:
+            if key not in allowed:
+                raise ConfigError(f"unknown field {key} in inline")
+        for key in panel.data.filter or {}:
+            if key not in allowed:
+                raise ConfigError(f"unknown filter key {key} in inline")
+        full: Iterable[dict[str, Any]] = cast(
+            list[dict[str, Any]], copy.deepcopy(panel.data.rows or [])
+        )
+    elif source == "groups":
+        full = group_rows(scope)
     else:
         names = _filter_names(panel.data.filter) if source == "metrics" else None
         full = iter_rows(scope.ctx, scope.runs, source, labels=scope.labels(), names=names)
@@ -583,7 +614,7 @@ def _table_rows(scope: _Scope, panel: PanelSpec) -> tuple[list[dict[str, Any]], 
             continue
         total += 1
         if len(rows) < MAX_TABLE_ROWS:
-            if source == "groups":
+            if source in ("groups", "inline"):
                 rows.append(row if fields is None else {f: row.get(f) for f in fields})
             else:
                 rows.append(select_fields(row, fields))

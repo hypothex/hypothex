@@ -47,7 +47,10 @@ homes. They never regenerate the oracle with current code. Upgrade, restart and
 explicit reindex must preserve records, scores, strict bound comparisons,
 notebook/settings data and paired/revoked session semantics. Schema-4 checks also
 preserve names, literal search, parent links, metric directions, saved views,
-selected-score boards, curves and carried index state.
+selected-score boards, curves and carried index state. The response comparison
+allows the new optional ``rows: null`` default only at saved-view panel-data
+paths; it still rejects populated inline rows, unrelated added fields, and
+changes to existing source data. Historical fixtures remain unchanged.
 
 SQLite upgrades automatically rebuild the disposable index. ``hx db upgrade``
 is for PostgreSQL; it is not a SQLite upgrade command. The resource test executes

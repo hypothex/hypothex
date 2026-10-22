@@ -8,6 +8,7 @@ use ``snapshot`` under their pinned historical interpreters to freeze oracles.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -240,12 +241,20 @@ def _resources(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _equal_old(expected: Any, actual: Any, path: str = "", *, schema: int) -> None:
-    """Compare every frozen field, allowing only documented Phase 3 additions."""
+    """Compare every frozen field, allowing only documented additive defaults."""
     if isinstance(expected, dict):
         assert isinstance(actual, dict), path
         additions = {"owner", "baselines", "cleaned"}
         if schema == 3:
             additions |= {"name", "config_format", "n_finished"}
+        # Legacy views retain stored sources; the new inline option stays unset.
+        if (
+            re.fullmatch(r"view/spec/panels/[0-9]+/data", path)
+            and "rows" not in expected
+            and "rows" in actual
+        ):
+            assert actual["rows"] is None, (path, "unexpected inline rows")
+            additions.add("rows")
         assert set(actual) - set(expected) <= additions, (path, sorted(set(actual) - set(expected)))
         for key, value in expected.items():
             assert key in actual, (path, key)

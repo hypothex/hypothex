@@ -29,3 +29,22 @@ The review report and this status update are administrative follow-up only.
 
 CI runs on GitHub; local verification and independent review do not imply a green
 remote CI verdict. No merge performed.
+
+## Package CI follow-up
+
+The first GitHub package job failed its schema-4 historical comparison because
+PanelData now emits the additive default `rows: null`. The focused correction
+allows only that null default at exact saved-view panel-data paths; unexpected
+values/keys and changed historical data still fail, and frozen fixtures are intact.
+The independent follow-up review is LGTM with zero reproduced defects; see
+[the packaging review](reviews/wandb-visuals-pr28-packaging.md).
+
+- New regressions: 2 failed before the correction, then passed.
+- Package harness tests: 23 passed; packaging Ruff/format/ty and Sphinx passed.
+- Full installed-wheel acceptance: 5 passed in 194.53s, including fresh token/team
+  behavior, schema-3/schema-4 upgrade, restart and explicit reindex with browser checks.
+- Independent reviewer: 2 schema regressions and 18 negative/nested probes passed.
+- External sanitized package evidence: `/Users/shreyasv/.codex/reports/hypothex-visuals/pr28-package/`.
+
+The follow-up is committed and pushed for fresh GitHub checks; these local results
+do not claim the new remote run has finished. PR remains open and unmerged.

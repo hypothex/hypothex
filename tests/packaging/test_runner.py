@@ -513,3 +513,28 @@ def test_descendant_identity_proof_includes_detached_children(tmp_path: Path) ->
                 os.kill(child, signal.SIGKILL)
         parent.terminate()
         parent.wait(timeout=5)
+
+
+@pytest.mark.parametrize("schema", [3, 4])
+def test_legacy_view_allows_only_null_inline_rows_default(schema: int) -> None:
+    from tests.packaging.installed_checks import _equal_old
+
+    expected = {"source": "metrics", "fields": ["step", "value"]}
+    _equal_old(expected, {**expected, "rows": None}, "view/spec/panels/0/data", schema=schema)
+    for rows in ([], [{"value": 1}]):
+        with pytest.raises(AssertionError):
+            _equal_old(
+                expected, {**expected, "rows": rows}, "view/spec/panels/0/data", schema=schema
+            )
+    for path in ("records/run", "view/spec/panels/0", "view/spec/panels/x/data"):
+        with pytest.raises(AssertionError):
+            _equal_old(expected, {**expected, "rows": None}, path, schema=schema)
+    with pytest.raises(AssertionError):
+        _equal_old(expected, {**expected, "other": None}, "view/spec/panels/0/data", schema=schema)
+    with pytest.raises(AssertionError):
+        _equal_old(
+            expected,
+            {**expected, "source": "runs", "rows": None},
+            "view/spec/panels/0/data",
+            schema=schema,
+        )

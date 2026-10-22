@@ -72,11 +72,18 @@ Files live at the native repository root for use by ordinary Hub clients.
 New repositories are **private by default**. ``--public`` requests a public
 repository only when creating it. Existing visibility is preserved.
 
-A publication is one atomic commit containing files and the manifest; its full
-commit SHA pins the receipt. Concurrent branch updates reject the commit;
-retry from the new head. ``--revision`` defaults to ``main``; another branch
+A publication uses one atomic commit containing files and the manifest; its full
+commit SHA pins the receipt. An identical re-publication may reuse an existing
+commit. Before saving a receipt, Hypothex verifies the pinned manifest and every
+selected file's remote size and content identity. Concurrent branch changes
+that conflict with the publication are refused; retry from the new head.
+``--revision`` defaults to ``main``; another branch
 must already exist. Hub per-commit limits and account quotas still apply;
 Hypothex does not split uploads into partially visible commits.
+
+The selected snapshot defines the upload inventory. Repository ``.gitignore``
+rules do not remove selected files; Hypothex overrides those rules during
+preupload and refuses any file the SDK still marks as ignored.
 
 Later publications delete only paths listed in the previous Hypothex manifest
 that are missing from the new selection. These paths remain managed even if

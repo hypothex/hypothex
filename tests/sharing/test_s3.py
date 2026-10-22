@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import builtins
 import hashlib
+import importlib
 import io
 import os
 from pathlib import Path
@@ -209,14 +209,14 @@ def test_share_requires_member_selection_and_matching_manifest(tmp_path: Path) -
 
 
 def test_optional_dependency_is_lazy_and_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
-    original = builtins.__import__
+    original = importlib.import_module
 
     def no_boto(name: str, *args: Any, **kwargs: Any) -> Any:
         if name == "boto3":
             raise ImportError("sensitive-import-details")
         return original(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", no_boto)
+    monkeypatch.setattr(importlib, "import_module", no_boto)
     provider = S3Provider()
     reference = Reference(provider="s3", kind="dataset", location="test-bucket", revision="a" * 64)
     assert provider.access(reference).visibility == "provider-managed"

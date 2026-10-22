@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -27,13 +29,12 @@ _COPY_BYTES = 1024 * 1024
 
 def _sdk() -> Any:
     try:
-        import huggingface_hub
+        return importlib.import_module("huggingface_hub")
     except ImportError:
         raise SharingError(
             "Hugging Face integration requires hypothex[hf]; "
             "run uv sync --extra hf in a source checkout"
         ) from None
-    return huggingface_hub
 
 
 @contextmanager
@@ -134,6 +135,48 @@ class HuggingFaceProvider:
             raise SharingError("Hugging Face publication manifest exceeds the size limit")
         return raw
 
+    def _verify_publication(
+        self,
+        snapshot: Path,
+        manifest: Manifest,
+        reference: Reference,
+    ) -> None:
+        """Verify the returned immutable revision without downloading model data."""
+        # create_commit may skip every unchanged operation and return a newer
+        # branch head without enforcing parent_commit. Never trust that return
+        # value alone, including when the manifest matches but data was edited.
+        if self.load_manifest(reference) != manifest.to_bytes():
+            raise SharingError("Hugging Face committed manifest does not match the publication")
+        for start in range(0, len(manifest.files), 1000):
+            batch = manifest.files[start : start + 1000]
+            entries = self._client().get_paths_info(
+                repo_id=reference.location,
+                paths=[entry.path for entry in batch],
+                repo_type=reference.kind,
+                revision=reference.revision,
+            )
+            by_path = {entry.path: entry for entry in entries}
+            if len(entries) != len(batch) or set(by_path) != {entry.path for entry in batch}:
+                raise SharingError("Hugging Face committed file inventory does not match")
+            for entry in batch:
+                remote = by_path[entry.path]
+                size = getattr(remote, "size", None)
+                if type(size) is not int or size != entry.size:
+                    raise SharingError("Hugging Face committed file size does not match")
+                lfs = getattr(remote, "lfs", None)
+                if lfs is not None:
+                    matches = getattr(lfs, "sha256", None) == entry.sha256
+                else:
+                    # Git blob IDs include a size header. Stream local files;
+                    # remote model data is never fetched for this verification.
+                    digest = hashlib.sha1(f"blob {entry.size}\0".encode())
+                    with (snapshot / entry.path).open("rb") as stream:
+                        while chunk := stream.read(_COPY_BYTES):
+                            digest.update(chunk)
+                    matches = getattr(remote, "blob_id", None) == digest.hexdigest()
+                if not matches:
+                    raise SharingError("Hugging Face committed file identity does not match")
+
     def publish(self, snapshot: Path, manifest: Manifest, target: Target) -> Reference:
         """
         Commit snapshot files and their manifest as one repository revision.
@@ -205,6 +248,22 @@ class HuggingFaceProvider:
             operations.append(
                 sdk.CommitOperationAdd(path_in_repo=MANIFEST_PATH, path_or_fileobj=raw)
             )
+            additions = [op for op in operations if isinstance(op, sdk.CommitOperationAdd)]
+            # The public preupload API overrides local and remote .gitignore,
+            # while preserving the user's .gitignore bytes in the publication.
+            # create_commit reuses these prepared operations. Its payload writer
+            # silently drops ignored additions, so inspect the SDK's populated
+            # flag (present throughout supported 1.x) before any manifest commit.
+            client.preupload_lfs_files(
+                repo_id=target.repo_id,
+                repo_type=manifest.kind,
+                revision=parent.revision,
+                additions=additions,
+                gitignore_content="",
+                free_memory=False,
+            )
+            if any(getattr(op, "_should_ignore", None) is not False for op in additions):
+                raise SharingError("Hugging Face ignored a selected publication file")
             commit = client.create_commit(
                 repo_id=target.repo_id,
                 repo_type=manifest.kind,
@@ -213,12 +272,14 @@ class HuggingFaceProvider:
                 operations=operations,
                 commit_message=f"Publish Hypothex {manifest.kind} {manifest.digest[:12]}",
             )
-            return Reference(
+            reference = Reference(
                 provider="hf",
                 kind=manifest.kind,
                 location=target.repo_id,
                 revision=_sha(commit.oid),
             )
+            self._verify_publication(snapshot, manifest, reference)
+            return reference
 
     def load_manifest(self, reference: Reference) -> bytes:
         """

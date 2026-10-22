@@ -119,3 +119,36 @@ opening a PR and having review agents review the published PR. That is the
 current authorized handoff. Review the exact pushed diff and resolve reproduced
 findings before reporting completion. Do not merge or contact real cloud accounts
 to test transfers.
+
+Published PR #29: https://github.com/hypothex/hypothex/pull/29, initially at
+`630558af38a71999ab803946a8fc25cc2696b603`. Two independent PR reviewers ran
+against that pushed head. The adversarial reviewer found no additional defects
+(128 tests and 19 extra probes), but the contract reviewer reproduced two HF
+issues using real SDK processing on both supported floor/current versions:
+
+- P1: SDK .gitignore processing silently dropped selected files while allowing
+  a completed manifest/receipt.
+- P2: SDK no-op optimization could bypass parent_commit and return a concurrent
+  branch head with a different publication.
+
+Corrections: explicit preupload with an empty gitignore override and refusal of
+ignored/unknown operation states; verify the returned pinned manifest plus
+remote file size and Git/LFS content identity before writing a receipt. Model
+files are not downloaded for this verification. Thirteen additional HF cases
+cover the real SDK behavior, same-manifest changed-file races, valid no-ops,
+content mismatches and fail-closed preupload flags. Documentation was updated.
+
+The first PR CI run also found unresolved optional SDK imports in the base
+installation's ty check. Both adapters now load optional modules through
+importlib, preserving actionable missing-extra errors. Sharing, UI, Docker and
+package jobs passed at the initial head; matrix testing stopped at the type
+failure. This is addressed locally and requires a new pushed CI run.
+
+Correction validation on frozen source, 2026-10-22:
+- Full sharing suite: 141 passed with current SDKs and again with isolated
+  huggingface-hub 1.0.0 / boto3 1.40.0.
+- ty src passes with both provider extras and in an isolated base installation.
+- Repository Ruff lint/format, git diff --check and Sphinx -W pass.
+- Broader 3,878-test evidence above predates these HF/import corrections; the
+  final focused tests cover this delta. No real cloud-account calls were made.
+- Both PR reviewers will independently re-review the pushed correction head.

@@ -6,6 +6,7 @@ Bucket policies, IAM rules and ACLs remain under the bucket owner's control.
 
 from __future__ import annotations
 
+import importlib
 import re
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -121,8 +122,9 @@ class S3Provider:
         options = self._options(location)
         if options not in self._clients:
             try:
-                import boto3
-                from botocore.config import Config
+                # Load optional SDKs at runtime; base installations have neither module.
+                boto3 = importlib.import_module("boto3")
+                config_module = importlib.import_module("botocore.config")
             except ImportError:
                 raise SharingError(
                     "S3 sharing requires the optional SDK; install hypothex[s3] "
@@ -135,7 +137,7 @@ class S3Provider:
                     "s3",
                     endpoint_url=options[0],
                     region_name=options[1],
-                    config=Config(signature_version="s3v4"),
+                    config=config_module.Config(signature_version="s3v4"),
                 )
             except Exception:
                 raise SharingError(
@@ -170,7 +172,7 @@ class S3Provider:
                 )
             return client, region
         if region not in self._signing_clients:
-            from botocore.config import Config
+            config_module = importlib.import_module("botocore.config")
 
             try:
                 assert self._session is not None
@@ -179,7 +181,7 @@ class S3Provider:
                 self._signing_clients[region] = self._session.client(
                     "s3",
                     region_name=region,
-                    config=Config(
+                    config=config_module.Config(
                         signature_version="s3v4",
                         ignore_configured_endpoint_urls=True,
                         s3={
